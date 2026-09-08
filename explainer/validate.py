@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import enum
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,6 +91,17 @@ def check_syntax(code: str) -> Check:
             False,
             "No Scene subclass found. Define exactly one class inheriting from Scene.",
         )
+    if len(names) > 1:
+        # One Manim Scene per IR scene is an architectural invariant, not a
+        # style preference: manim renders the class it is told to and the
+        # others silently never appear. Rejecting it here costs 0.07 ms;
+        # discovering it after the render costs a scene.
+        return Check(
+            Level.SYNTAX,
+            False,
+            f"Found {len(names)} Scene subclasses ({', '.join(names)}). "
+            "Define exactly one class inheriting from Scene.",
+        )
     return Check(Level.SYNTAX, True, scene_name=names[0])
 
 
@@ -111,6 +123,7 @@ print(json.dumps({"ok": True}))
 
 
 def check_import(workdir: Path, scene_name: str, timeout: float = 120.0) -> Check:
+    workdir.mkdir(parents=True, exist_ok=True)
     driver = workdir / "_import_check.py"
     driver.write_text(_IMPORT_DRIVER, encoding="utf-8")
     done = run_python(
@@ -145,6 +158,12 @@ def render(
     timeout: float = 1800.0,
 ) -> Check:
     """Render to a video file. *quality* is manim's l/m/h/p/k."""
+    # manim never cleans media/, so a video left by an earlier render of
+    # this workdir is indistinguishable from this run's output, and picking
+    # the newest match is a guess rather than an answer. Clearing costs
+    # nothing: --disable_caching means there is no cache to lose.
+    workdir.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(workdir / "media", ignore_errors=True)
     done = run_python(
         ["-m", "manim", f"-q{quality}", "--disable_caching", SCENE_FILE, scene_name],
         cwd=workdir,
@@ -175,6 +194,7 @@ def validate(workdir: Path, code: str, up_to: Level = Level.DRYRUN) -> Check:
         return result
 
     scene_name = result.scene_name or ""
+    workdir.mkdir(parents=True, exist_ok=True)
     (workdir / SCENE_FILE).write_text(code, encoding="utf-8")
 
     result = check_import(workdir, scene_name)
@@ -202,7 +222,10 @@ def _driver_error(done: Completed) -> str:
 
 
 def _find_video(workdir: Path, scene_name: str) -> Path | None:
-    candidates = list((workdir / "media" / "videos").rglob(f"{scene_name}.mp4"))
+    """The video this run produced. ``render`` clears media/ beforehand,
+    so anything found here belongs to the render that just finished rather
+    than to whatever happened to be newest."""
+    candidates = sorted((workdir / "media" / "videos").rglob(f"{scene_name}.mp4"))
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return candidates[0]

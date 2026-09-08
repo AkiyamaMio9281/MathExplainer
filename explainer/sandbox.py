@@ -116,8 +116,14 @@ def run_python(
     timeout: float,
     extra_env: Mapping[str, str] | None = None,
 ) -> Completed:
-    """Run ``sys.executable`` with *args* under a timeout, in *cwd*."""
-    cwd.mkdir(parents=True, exist_ok=True)
+    """Run ``sys.executable`` with *args* under a timeout, in *cwd*.
+
+    *cwd* must already exist. A process runner that silently creates
+    directories hides the mistake of pointing it somewhere unintended,
+    and the caller writing files into the workdir has to create it anyway.
+    """
+    if not cwd.is_dir():
+        raise FileNotFoundError(f"sandbox working directory does not exist: {cwd}")
     started = time.perf_counter()
     try:
         proc = subprocess.run(

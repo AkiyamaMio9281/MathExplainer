@@ -111,7 +111,9 @@ Nothing else exists yet. No LLM client, no plan, no IR, no codegen, no agent.
 `run_python(args, cwd=, timeout=)` runs `sys.executable` as a child and returns
 a `Completed` with `returncode`, `stdout`, `stderr`, `seconds`, `timed_out`,
 plus `failure_text()` which trims to the tail (where the traceback is) for
-feeding back to the model.
+feeding back to the model. *cwd* must already exist -- it raises rather than
+creating it, so a workdir path typed wrong fails loudly instead of quietly
+rendering into a new directory nobody looks at.
 
 `child_env()` builds the environment from `_ENV_ALLOWLIST`, drops anything
 whose name looks like a credential, and raises if a caller tries to pass one in
@@ -147,6 +149,7 @@ Verified behaviour:
 | valid scene | L2 | pass | |
 | `class Demo(Scene)` missing colon | L0 | fail | `SyntaxError at line 2: expected ':'` |
 | no Scene subclass | L0 | fail | `No Scene subclass found` |
+| two Scene subclasses | L0 | fail | `Found 2 Scene subclasses (Demo, Extra)` |
 | undefined name inside `construct` | L2 | fail | `NameError: name 'NoSuchThing' is not defined` |
 | `1/0` inside `construct` | L2 | fail | `ZeroDivisionError` |
 | valid scene, `up_to=RENDER` | L3 | pass | produced `Demo.mp4` |
