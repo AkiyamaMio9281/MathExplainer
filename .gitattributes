@@ -1,0 +1,15 @@
+# Normalise line endings to LF in the repository and in the working tree,
+# overriding core.autocrlf. Development happens on Windows, where autocrlf is
+# on by default, but everything this repository holds is read by tools that
+# want LF -- Python sources, the manim scene files the pipeline writes into
+# each scene workdir, and the concat lists handed to ffmpeg. Pinning it here
+# stops a checkout on Linux or CI from reporting every line of every file as
+# changed.
+* text=auto eol=lf
+
+# Keep conversion away from rendered output. The MP4s are gitignored, but a
+# demo clip added with -f would otherwise be silently corrupted.
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.pdf binary
