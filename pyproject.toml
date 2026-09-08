@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+# tests/ has no __init__.py, so pytest puts tests/ on sys.path and leaves the
+# repository root off it -- `import explainer` then fails with a
+# ModuleNotFoundError that looks like a broken checkout. Needs pytest >= 7.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+# --strict-markers turns a mistyped marker into an error. Without it
+# @pytest.mark.slwo is silently a no-op, and the fast suite quietly starts
+# spawning subprocesses again.
+addopts = "--strict-markers"
+
+markers = [
+    "slow: spawns a subprocess; excluded by -m 'not slow'",
+    "api: needs ANTHROPIC_API_KEY; skipped automatically when it is unset",
+]
