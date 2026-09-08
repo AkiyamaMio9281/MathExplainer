@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Manim output
+media/
+*.mp4
+
+# Pipeline artifacts
+runs/
+out/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

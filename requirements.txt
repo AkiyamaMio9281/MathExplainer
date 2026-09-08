@@ -1,0 +1,7 @@
+# Generation
+anthropic>=1.4.0
+
+# Rendering. Also needs two system dependencies manim shells out to:
+#   ffmpeg  -- frame encoding and scene concatenation
+#   latex   -- MathTex (TeX Live or MiKTeX)
+manim>=0.21.0
