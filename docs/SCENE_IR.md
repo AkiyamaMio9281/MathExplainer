@@ -118,6 +118,19 @@ a clean compile and only surface when a human watched the video.
 | `positive-duration` | every `duration` > 0 |
 | `non-empty` | each scene has >= 1 object and >= 1 step |
 | `action-applies` | `write` only on text-ish types; `create` not on `text` |
+| `document-shape` | the document, and its `scenes`/`objects`/`steps`, are the right kind of container |
+| `known-version` | `version` is the one this document describes |
+| `known-action` | `action` is in the table above |
+| `field-shape` | each field is the right kind of value: a point is two numbers, a range is three |
+
+Four of these are decided while the document is being typed, and so live in
+`explainer/ir.py` rather than in `ir_rules.py`: `known-type`, `known-action`,
+`required-fields` and `field-shape` all decide whether a typed object can be
+built at all, and the rest need a built one in order to run. The parser
+collects them rather than raising, so one repair round carries every defect
+instead of the first; anything it could not type is dropped from the document
+and reported, which is why a document with errors is a subset of what the
+model wrote and is never rendered in that state.
 
 **Warnings** (recorded, may trigger `simplify_ir`, do not block rendering):
 
@@ -125,6 +138,7 @@ a clean compile and only surface when a human watched the video.
 |---|---|---|
 | `in-frame` | every position / point within `|x| <= 6.6`, `|y| <= 3.6` | objects placed off the edge are invisible in the output but render without error |
 | `no-overlap` | approximate bounding boxes of simultaneously-visible objects do not intersect | overlapping text is the single most common way a generated scene looks broken |
+| `unknown-field` | a field the object type or action does not use | usually the model confusing two types; the value is reported and dropped rather than silently carried |
 | `pacing` | `len(narration.split()) / 150 * 60` within 30% of `sum(step durations)` | narration and animation drift apart; 150 wpm is a normal explainer pace |
 | `scene-length` | total duration between 5 s and 90 s | very short scenes look like glitches, very long ones lose the viewer |
 
