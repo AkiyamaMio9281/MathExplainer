@@ -150,6 +150,7 @@ Verified behaviour:
 | `class Demo(Scene)` missing colon | L0 | fail | `SyntaxError at line 2: expected ':'` |
 | no Scene subclass | L0 | fail | `No Scene subclass found` |
 | two Scene subclasses | L0 | fail | `Found 2 Scene subclasses (Demo, Extra)` |
+| module-level `import` of a missing module | L1 | fail | `ModuleNotFoundError` |
 | undefined name inside `construct` | L2 | fail | `NameError: name 'NoSuchThing' is not defined` |
 | `1/0` inside `construct` | L2 | fail | `ZeroDivisionError` |
 | valid scene, `up_to=RENDER` | L3 | pass | produced `Demo.mp4` |
