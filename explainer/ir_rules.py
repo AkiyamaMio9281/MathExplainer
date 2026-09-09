@@ -32,19 +32,43 @@ A rule never reports what another rule already owns. A step whose target is
 not declared is `reference-integrity`'s business, so the timeline and
 `action-applies` skip it rather than adding a second complaint about the same
 character.
+
+The four warnings are layout and timing checks. They do not block a render --
+they are recorded, and may drive `simplify_ir` -- because the geometry is
+estimated rather than computed: exact text extents need a font engine this
+module deliberately does not load.
+
+**The estimator's constants are measured, not guessed.** The first draft of
+SCENE_IR.md put text at `0.55 * font_size/36` units per character and one unit
+tall, which is roughly twice Manim's real extents in both directions; under
+those numbers the title in the specification's own example came out 16.9 units
+wide against a 14.2-unit frame, so `in-frame` would have rejected the canonical
+document. Measured against ManimCE 0.21.0, a character is about 0.23 units
+wide per `font_size/36` and a line 0.24 to 0.49 tall depending on ascenders and
+descenders. The values below sit just above the measured means, because an
+estimate that is slightly too large turns a near-miss into a warning, while one
+that is too large by a factor of two turns every scene into one.
+
+Axes are the other correction. SCENE_IR.md derived their size from `x_range`
+and `y_range`; Manim does not -- it sizes axes from the frame and uses the
+range for tick labels, so an axes is 12 by 6 whatever range it carries. That
+also settles `no-overlap`: an axes is a backdrop covering most of the frame,
+and objects are meant to be drawn over it, so axes and plots are left out of
+the overlap comparison. Including them would fire on nearly every scene that
+plots anything, and the rule exists to catch overlapping text.
 """
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
-from typing import Callable, Iterable, Iterator
+from typing import Callable, Iterable, Iterator, Mapping
 
 from . import ir
 from .ir import Issue, Severity
 
-#: Everything this module can emit. Metrics record which rule caught which
-#: defect, and the test suite asserts that each of these has a case.
-RULE_NAMES = frozenset(
+#: Rules that reject a document.
+ERROR_RULES = frozenset(
     {
         "non-empty",
         "unique-ids",
@@ -55,6 +79,45 @@ RULE_NAMES = frozenset(
         "action-applies",
     }
 )
+
+#: Rules that are recorded and may drive simplification, but do not block a
+#: render. All four rest on estimated geometry or on a rule of thumb.
+WARNING_RULES = frozenset({"in-frame", "no-overlap", "pacing", "scene-length"})
+
+#: Everything this module can emit. Metrics record which rule caught which
+#: defect, and the test suite asserts that each of these has a case.
+RULE_NAMES = ERROR_RULES | WARNING_RULES
+
+# Frame geometry, from manim's default config and independent of render
+# quality: -ql changes pixels, not units.
+FRAME_WIDTH = 14.222
+FRAME_HEIGHT = 8.0
+
+#: The margin in-frame enforces. Tighter than the frame because an object
+#: whose estimated box just fits usually spills in the render.
+MARGIN_X = 6.6
+MARGIN_Y = 3.6
+
+# Text extents, measured against ManimCE 0.21.0 and expressed per font_size/36.
+# See the module docstring for why these are not the numbers SCENE_IR.md first
+# carried.
+TEXT_WIDTH_PER_CHAR = 0.25  # measured mean 0.233, max 0.257
+TEXT_HEIGHT = 0.50  # measured 0.241 to 0.486, by ascender and descender
+MATHTEX_WIDTH_PER_CHAR = 0.16  # measured mean 0.134, max 0.186
+MATHTEX_HEIGHT = 0.60  # measured 0.169 to 0.772; fractions are tall
+
+# Manim sizes axes from the frame, not from x_range/y_range.
+AXES_WIDTH = 12.0
+AXES_HEIGHT = 6.0
+
+#: A normal explainer pace, and how far narration may drift from animation.
+WORDS_PER_MINUTE = 150.0
+PACING_TOLERANCE = 0.30
+
+#: Below the first a scene reads as a glitch; above the second it loses the
+#: viewer.
+MIN_SCENE_SECONDS = 5.0
+MAX_SCENE_SECONDS = 90.0
 
 #: `write` draws a glyph outline stroke by stroke, so it means nothing on a
 #: shape; `create` is the converse.
@@ -262,6 +325,225 @@ def timeline(scene: ir.Scene, where: str) -> Iterable[Issue]:
             )
 
 
+# ---------------------------------------------------------------------------
+# Estimated geometry
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Box:
+    """An axis-aligned bounding box in Manim units."""
+
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+
+    @classmethod
+    def around(cls, centre: ir.Point, width: float, height: float) -> "Box":
+        x, y = centre
+        return cls(x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+
+    @classmethod
+    def containing(cls, points: Iterable[ir.Point]) -> "Box":
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        return cls(min(xs), min(ys), max(xs), max(ys))
+
+    @property
+    def centre(self) -> ir.Point:
+        return ((self.min_x + self.max_x) / 2, (self.min_y + self.max_y) / 2)
+
+    @property
+    def width(self) -> float:
+        return self.max_x - self.min_x
+
+    @property
+    def height(self) -> float:
+        return self.max_y - self.min_y
+
+    def moved_to(self, centre: ir.Point) -> "Box":
+        """The same box with its centre at *centre*.
+
+        A ``move`` translates whatever the object is, so modelling it as a
+        translation of the box works for every type without asking which of
+        position, center, start or points it happens to carry.
+        """
+        return Box.around(centre, self.width, self.height)
+
+    def intersects(self, other: "Box") -> bool:
+        """True when the boxes share area. Touching edges do not count."""
+        return (
+            self.min_x < other.max_x
+            and other.min_x < self.max_x
+            and self.min_y < other.max_y
+            and other.min_y < self.max_y
+        )
+
+    def within(self, half_width: float, half_height: float) -> bool:
+        return (
+            -half_width <= self.min_x
+            and self.max_x <= half_width
+            and -half_height <= self.min_y
+            and self.max_y <= half_height
+        )
+
+
+def bounding_box(
+    obj: ir.SceneObject, declared: Mapping[str, ir.SceneObject] | None = None
+) -> Box | None:
+    """An estimate of what *obj* occupies, or None when it cannot be placed."""
+    if isinstance(obj, ir.Text):
+        scale = obj.font_size / 36.0
+        return Box.around(
+            obj.position,
+            TEXT_WIDTH_PER_CHAR * len(obj.content) * scale,
+            TEXT_HEIGHT * scale,
+        )
+    if isinstance(obj, ir.MathTex):
+        scale = obj.font_size / 36.0
+        return Box.around(
+            obj.position,
+            MATHTEX_WIDTH_PER_CHAR * len(obj.content) * scale,
+            MATHTEX_HEIGHT * scale,
+        )
+    if isinstance(obj, ir.Polygon):
+        return Box.containing(obj.points)
+    if isinstance(obj, ir.Circle):
+        return Box.around(obj.center, obj.radius * 2, obj.radius * 2)
+    if isinstance(obj, ir.Rectangle):
+        return Box.around(obj.center, obj.width, obj.height)
+    if isinstance(obj, (ir.Line, ir.Arrow)):
+        return Box.containing((obj.start, obj.end))
+    if isinstance(obj, ir.Axes):
+        return Box.around(obj.position, AXES_WIDTH, AXES_HEIGHT)
+    if isinstance(obj, ir.Plot):
+        # A plot is drawn on its axes and bounded by them.
+        axes = (declared or {}).get(obj.axes)
+        if not isinstance(axes, ir.Axes):
+            return None  # reference-integrity owns this
+        return bounding_box(axes)
+    return None
+
+
+def _boxes(scene: ir.Scene) -> dict[str, Box]:
+    declared = {obj.id: obj for obj in scene.objects}
+    placed = {}
+    for obj in scene.objects:
+        box = bounding_box(obj, declared)
+        if box is not None:
+            placed[obj.id] = box
+    return placed
+
+
+# ---------------------------------------------------------------------------
+# Warnings
+# ---------------------------------------------------------------------------
+
+
+def in_frame(scene: ir.Scene, where: str) -> Iterable[Issue]:
+    boxes = _boxes(scene)
+    reported: set[str] = set()
+
+    for index, obj in enumerate(scene.objects):
+        box = boxes.get(obj.id)
+        if box is not None and not box.within(MARGIN_X, MARGIN_Y):
+            reported.add(obj.id)
+            yield Issue(
+                "in-frame",
+                f"{obj.id!r} extends to x {box.min_x:.2f}..{box.max_x:.2f}, "
+                f"y {box.min_y:.2f}..{box.max_y:.2f}, outside the "
+                f"{MARGIN_X} by {MARGIN_Y} margin",
+                f"{where}.objects[{index}]",
+                Severity.WARNING,
+            )
+
+    # A move can push something off the edge that was declared inside it.
+    for index, step in enumerate(scene.steps):
+        if step.action is not ir.Action.MOVE or step.to is None:
+            continue
+        box = boxes.get(step.target)
+        if box is None or step.target in reported:
+            continue
+        moved = box.moved_to(step.to)
+        if not moved.within(MARGIN_X, MARGIN_Y):
+            reported.add(step.target)
+            yield Issue(
+                "in-frame",
+                f"moving {step.target!r} to {step.to} puts it outside the "
+                f"{MARGIN_X} by {MARGIN_Y} margin",
+                f"{where}.steps[{index}]",
+                Severity.WARNING,
+            )
+
+
+def no_overlap(scene: ir.Scene, where: str) -> Iterable[Issue]:
+    declared = {obj.id: obj for obj in scene.objects}
+    boxes = {
+        obj_id: box
+        for obj_id, box in _boxes(scene).items()
+        # Axes and plots are backdrops that other objects are meant to sit on.
+        if not isinstance(declared[obj_id], (ir.Axes, ir.Plot))
+    }
+    reported: set[tuple[str, str]] = set()
+
+    for moment in walk(scene):
+        step = moment.step
+        if step.action is ir.Action.MOVE and step.to is not None and step.target in boxes:
+            boxes[step.target] = boxes[step.target].moved_to(step.to)
+
+        present = sorted(i for i in moment.visible_after if i in boxes)
+        for first, second in itertools.combinations(present, 2):
+            if (first, second) in reported:
+                continue
+            if boxes[first].intersects(boxes[second]):
+                reported.add((first, second))
+                yield Issue(
+                    "no-overlap",
+                    f"{first!r} and {second!r} are on screen together and their "
+                    "estimated bounding boxes overlap",
+                    f"{where}.steps[{moment.index}]",
+                    Severity.WARNING,
+                )
+
+
+def pacing(scene: ir.Scene, where: str) -> Iterable[Issue]:
+    animated = sum(step.duration for step in scene.steps)
+    if animated <= 0:
+        return  # non-empty and positive-duration own that
+    spoken = len(scene.narration.split()) / WORDS_PER_MINUTE * 60.0
+    if abs(spoken - animated) > PACING_TOLERANCE * animated:
+        yield Issue(
+            "pacing",
+            f"narration reads in about {spoken:.1f}s but the animation runs "
+            f"{animated:.1f}s",
+            where,
+            Severity.WARNING,
+        )
+
+
+def scene_length(scene: ir.Scene, where: str) -> Iterable[Issue]:
+    if not scene.steps:
+        return  # non-empty owns that
+    total = sum(step.duration for step in scene.steps)
+    if total < MIN_SCENE_SECONDS:
+        yield Issue(
+            "scene-length",
+            f"the scene runs {total:.1f}s, under the {MIN_SCENE_SECONDS:.0f}s "
+            "below which it reads as a glitch",
+            where,
+            Severity.WARNING,
+        )
+    elif total > MAX_SCENE_SECONDS:
+        yield Issue(
+            "scene-length",
+            f"the scene runs {total:.1f}s, over the {MAX_SCENE_SECONDS:.0f}s "
+            "beyond which it loses the viewer",
+            where,
+            Severity.WARNING,
+        )
+
+
 DocumentRule = Callable[[ir.Document], Iterable[Issue]]
 SceneRule = Callable[[ir.Scene, str], Iterable[Issue]]
 
@@ -274,6 +556,10 @@ SCENE_RULES: tuple[SceneRule, ...] = (
     positive_duration,
     action_applies,
     timeline,
+    in_frame,
+    no_overlap,
+    pacing,
+    scene_length,
 )
 
 

@@ -150,12 +150,38 @@ rendered DOM, and worth naming that way when writing this up.
 
 Exact text extents need a font engine, which the validator deliberately does
 not load. Approximate instead, and treat `no-overlap` as a warning because the
-estimate is rough:
+estimate is rough. Per `font_size / 36`, centred on `position`:
 
-- `text` / `mathtex`: `width ~= 0.55 * font_size / 36 * len(content)`,
-  `height ~= 1.0 * font_size / 36`, centred on `position`
-- shapes: the bounding box of their points / centre and radius
-- `axes`: from `x_range` / `y_range` extents around `position`
+| Type | Width | Height |
+|---|---|---|
+| `text` | `0.25 * len(content)` | `0.50` |
+| `mathtex` | `0.16 * len(content)` | `0.60` |
+| shapes | exact, from their points / centre and radius | |
+| `axes` | `12`, whatever the range | `6` |
+| `plot` | the box of the `axes` it is drawn on | |
+
+**These constants are measured, against ManimCE 0.21.0.** The first draft of
+this document guessed `0.55` per character and `1.0` tall, which is about
+twice what manim actually produces: under those numbers the title in the
+example above came out 16.9 units wide against a 14.2-unit frame, so
+`in-frame` rejected this document's own example. Measured, a character is
+0.21-0.26 units wide and a line 0.24-0.49 tall per `font_size / 36`; the
+values in the table sit just above the means, because an estimate slightly too
+large turns a near miss into a warning while one that is too large by a factor
+of two turns every scene into one. `tests/test_ir_rules.py` re-measures against
+manim, so these do not quietly rot.
+
+Two corrections worth stating separately. **Axes do not take their size from
+`x_range` / `y_range`** -- manim sizes them from the frame and uses the range
+for tick labels, so an axes is 12 by 6 whatever it plots. And because that is
+most of the frame, **`axes` and `plot` are left out of `no-overlap`**: they are
+backdrops that other objects are meant to be drawn over, and counting them
+would fire on nearly every scene that plots anything. `no-overlap` exists to
+catch overlapping text.
+
+`move` is modelled as translating an object's box so its centre lands on `to`,
+which works for every type without asking which of `position`, `center`,
+`start` or `points` it happens to carry.
 
 ## Simplification
 
