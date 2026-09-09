@@ -109,15 +109,15 @@ a clean compile and only surface when a human watched the video.
 
 | Rule | Check |
 |---|---|
-| `unique-ids` | object ids are unique within a scene |
+| `unique-ids` | object ids are unique within a scene, and scene ids within the document |
 | `known-type` | `type` is in the table above |
 | `required-fields` | every required field for that type is present |
-| `reference-integrity` | every `target` / `into` / `plot.axes` names a declared object |
+| `reference-integrity` | every `target` / `into` names a declared object, and `plot.axes` a declared `axes` |
 | `introduced-before-use` | no action on an object before it is introduced |
 | `not-after-removal` | no action on an object after `fade_out`, or after it is a `transform` target |
 | `positive-duration` | every `duration` > 0 |
-| `non-empty` | each scene has >= 1 object and >= 1 step |
-| `action-applies` | `write` only on text-ish types; `create` not on `text` |
+| `non-empty` | the document has >= 1 scene; each scene has >= 1 object and >= 1 step |
+| `action-applies` | `write` only on `text`/`mathtex`; `create` only on the rest |
 | `document-shape` | the document, and its `scenes`/`objects`/`steps`, are the right kind of container |
 | `known-version` | `version` is the one this document describes |
 | `known-action` | `action` is in the table above |
