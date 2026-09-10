@@ -173,6 +173,7 @@ MathExplainer/
     ir.py                 LessonPlan -> SceneIR; IR dataclasses
     ir_rules.py           IR validation rules (pure functions)
     codegen.py            IR scene -> Manim source
+    spine.py              document -> mp4, with no agent around it
     repair.py             repair + escalation ladder
     agent.py              state, tool dispatch, budget
     video.py              ffmpeg concat

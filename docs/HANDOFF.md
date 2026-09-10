@@ -102,9 +102,19 @@ Set it yourself when running ad-hoc scripts that print anything but ASCII.
 explainer/
   sandbox.py     isolated subprocess execution   done, verified
   validate.py    tiered code validation          done, verified
+  ir.py          Scene IR dataclasses + parser   done, tested
+  ir_rules.py    11 validation rules             done, tested
+  llm.py         Anthropic client + costing      done, verified live
+  codegen.py     IR scene -> Manim source        done, verified live
+  video.py       ffmpeg concat                   done, tested
+  spine.py       document -> mp4, no agent       done, verified live
 ```
 
-Nothing else exists yet. No LLM client, no plan, no IR, no codegen, no agent.
+**The spine runs.** `python -m explainer.spine docs/examples/pythagoras.json
+runs/spine` takes a hand-written IR document to a finished lesson.mp4. What is
+still missing is everything that makes it an agent: no planner, no IR
+generator, no repair, no escalation ladder, no budget, no metrics, no CLI that
+takes a prompt. Those are commits 21-27 in `ROADMAP.md`.
 
 ### `sandbox.py`
 
@@ -188,6 +198,26 @@ Two consequences:
 **Cold start is 9.2 s.** The first-ever manim invocation builds LaTeX and font
 caches. Warm runs are the numbers above. Do not benchmark the first run.
 
+### End to end (measured 2026-09-09)
+
+`docs/examples/pythagoras.json`, three scenes, hand-written, through codegen ->
+validate -> render -> concat with no repair loop:
+
+```
+3/3 scenes rendered in 32.3s for $0.0337
+  ok   statement  (8.4s)
+  ok   squares   (15.0s)
+  ok   conclusion (8.8s)
+```
+
+All three passed L0 through L2 on the first attempt. That is three samples, not
+a success rate -- the ablations in commit 28 are what turn this into a number
+worth quoting -- but it means the repair loop will be built against a pipeline
+that already works rather than one that depends on it.
+
+Of the 32.3 s, generation is most of it; the renders are the second-and-a-bit
+each that the tier table below predicts.
+
 ### Prompt caching (measured 2026-09-09, `claude-opus-5`)
 
 A 7 803-token preamble sent twice:
@@ -220,7 +250,11 @@ frame_height = 8.000   ->  y in [-4.000, 4.000]
 
 ## 6. What to build next, in order
 
-1. **`explainer/llm.py`** — Anthropic client wrapper. `claude-opus-5`,
+**Items 1-6 below are done** (commits 12-20; see `ROADMAP.md` for what each
+one settled). They are kept here because the reasoning still applies to what
+wraps them.
+
+1. ~~**`explainer/llm.py`**~~ — Anthropic client wrapper. `claude-opus-5`,
    adaptive thinking, token/cost accounting, typed error handling. Structured
    outputs (`output_config.format`) for anything with a schema. Read the
    `claude-api` skill before writing this; several API shapes changed in
