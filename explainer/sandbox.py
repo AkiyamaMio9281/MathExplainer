@@ -109,25 +109,29 @@ class Completed:
         return text
 
 
-def run_python(
+def run(
     args: Sequence[str],
     *,
     cwd: Path,
     timeout: float,
     extra_env: Mapping[str, str] | None = None,
 ) -> Completed:
-    """Run ``sys.executable`` with *args* under a timeout, in *cwd*.
+    """Run *args* as a child process under a timeout, in *cwd*.
 
     *cwd* must already exist. A process runner that silently creates
     directories hides the mistake of pointing it somewhere unintended,
     and the caller writing files into the workdir has to create it anyway.
+
+    Not only for generated Python: ffmpeg is invoked through here too, so the
+    allowlisted environment covers every subprocess this package starts rather
+    than only the one whose input is model-written.
     """
     if not cwd.is_dir():
         raise FileNotFoundError(f"sandbox working directory does not exist: {cwd}")
     started = time.perf_counter()
     try:
         proc = subprocess.run(
-            [sys.executable, *args],
+            list(args),
             cwd=str(cwd),
             env=child_env(extra_env),
             capture_output=True,
@@ -151,6 +155,17 @@ def run_python(
         seconds=time.perf_counter() - started,
         timed_out=False,
     )
+
+
+def run_python(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    extra_env: Mapping[str, str] | None = None,
+) -> Completed:
+    """Run ``sys.executable`` with *args* under a timeout, in *cwd*."""
+    return run([sys.executable, *args], cwd=cwd, timeout=timeout, extra_env=extra_env)
 
 
 def _as_text(raw: object) -> str:
