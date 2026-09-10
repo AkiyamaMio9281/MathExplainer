@@ -188,6 +188,27 @@ Two consequences:
 **Cold start is 9.2 s.** The first-ever manim invocation builds LaTeX and font
 caches. Warm runs are the numbers above. Do not benchmark the first run.
 
+### Prompt caching (measured 2026-09-09, `claude-opus-5`)
+
+A 7 803-token preamble sent twice:
+
+| | input | cache write | cache read | cost |
+|---|---|---|---|---|
+| first call | 14 | 7 803 | 0 | $0.0489 |
+| second call | 14 | 0 | 7 803 | $0.0041 |
+
+**The repeat costs 8.4% of the first** -- a cache read is a tenth of an input
+token, a write a quarter more than one. That is the whole argument for putting
+the Manim guidance and the IR spec in a cached preamble: they are identical on
+every codegen call and they dominate the tokens.
+
+Two things this measurement pins down. The minimum cacheable prefix is
+model-dependent, roughly 512-4096 tokens, and a preamble under it silently
+does not cache at all -- there is no error, only a bill. And cache entries
+live about five minutes, which makes any caching test that assumes a cold
+start flaky when run twice in that window; `tests/test_llm.py` puts a nonce in
+the preamble for exactly that reason.
+
 Frame geometry, needed by the IR validator and independent of quality:
 
 ```
