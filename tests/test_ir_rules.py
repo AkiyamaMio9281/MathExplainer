@@ -169,6 +169,21 @@ VIOLATIONS = (
         doc(scene([text()], [step("write", "t", duration=-1.0)])),
     ),
     (
+        "safe-ids",
+        "a scene id that would escape the working directory",
+        doc(scene([text()], [step("write", "t")], id="../../elsewhere")),
+    ),
+    (
+        "safe-ids",
+        "an object id that is a Python keyword",
+        doc(scene([text(id="class")], [step("write", "class")])),
+    ),
+    (
+        "safe-ids",
+        "an object id that shadows a Manim class",
+        doc(scene([text(id="Text")], [step("write", "Text")])),
+    ),
+    (
         "action-applies",
         "writing a shape",
         doc(scene([circle()], [step("write", "c")])),

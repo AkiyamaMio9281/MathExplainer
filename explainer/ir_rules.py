@@ -77,6 +77,7 @@ ERROR_RULES = frozenset(
         "not-after-removal",
         "positive-duration",
         "action-applies",
+        "safe-ids",
     }
 )
 
@@ -192,6 +193,19 @@ def document_non_empty(document: ir.Document) -> Iterable[Issue]:
         yield Issue("non-empty", "a document needs at least one scene", "$")
 
 
+def safe_scene_ids(document: ir.Document) -> Iterable[Issue]:
+    # A scene id becomes a working directory. Model-supplied text used to
+    # build a path is how a lesson writes outside the directory it was given.
+    for index, scene in enumerate(document.scenes):
+        if not ir.is_safe_id(scene.id):
+            yield Issue(
+                "safe-ids",
+                f"scene id {scene.id!r} must be a lowercase identifier: it "
+                "names a directory on disk",
+                f"scenes[{index}]",
+            )
+
+
 def unique_scene_ids(document: ir.Document) -> Iterable[Issue]:
     # Scene ids name working directories and output files, so a duplicate is
     # not a cosmetic clash: the second render would overwrite the first.
@@ -230,6 +244,20 @@ def unique_ids(scene: ir.Scene, where: str) -> Iterable[Issue]:
             )
         else:
             seen[obj.id] = index
+
+
+def safe_ids(scene: ir.Scene, where: str) -> Iterable[Issue]:
+    # An object id becomes a local variable in the generated file. Lowercase
+    # keeps it clear of Manim's CamelCase classes and ALLCAPS colours; the
+    # keyword check keeps it clear of Python itself.
+    for index, obj in enumerate(scene.objects):
+        if not ir.is_safe_id(obj.id):
+            yield Issue(
+                "safe-ids",
+                f"object id {obj.id!r} must be a lowercase identifier: it "
+                "becomes a variable name in the generated code",
+                f"{where}.objects[{index}]",
+            )
 
 
 def reference_integrity(scene: ir.Scene, where: str) -> Iterable[Issue]:
@@ -547,11 +575,16 @@ def scene_length(scene: ir.Scene, where: str) -> Iterable[Issue]:
 DocumentRule = Callable[[ir.Document], Iterable[Issue]]
 SceneRule = Callable[[ir.Scene, str], Iterable[Issue]]
 
-DOCUMENT_RULES: tuple[DocumentRule, ...] = (document_non_empty, unique_scene_ids)
+DOCUMENT_RULES: tuple[DocumentRule, ...] = (
+    document_non_empty,
+    unique_scene_ids,
+    safe_scene_ids,
+)
 
 SCENE_RULES: tuple[SceneRule, ...] = (
     non_empty,
     unique_ids,
+    safe_ids,
     reference_integrity,
     positive_duration,
     action_applies,

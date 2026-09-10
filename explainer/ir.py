@@ -41,12 +41,26 @@ from __future__ import annotations
 
 import enum
 import json
+import keyword
+import re
 from dataclasses import MISSING, dataclass
 from dataclasses import fields as dc_fields
 from typing import Any, ClassVar, Iterable, Mapping, Sequence
 
 VERSION = "1"
 DEFAULT_COLOR = "WHITE"
+
+#: Ids are not free-form labels. A scene id becomes a working directory, and
+#: an object id becomes a local variable in generated Python, so both are
+#: model-supplied text that ends up somewhere it can do damage. Lowercase is
+#: not style: it is what keeps an id from colliding with Manim's CamelCase
+#: classes or its ALLCAPS colour constants.
+SAFE_ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+
+def is_safe_id(name: str) -> bool:
+    """Whether *name* can be a directory and a Python local without trouble."""
+    return bool(SAFE_ID.match(name)) and not keyword.iskeyword(name)
 
 Point = tuple[float, float]
 Range = tuple[float, float, float]

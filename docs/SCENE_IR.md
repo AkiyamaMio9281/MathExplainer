@@ -110,6 +110,7 @@ a clean compile and only surface when a human watched the video.
 | Rule | Check |
 |---|---|
 | `unique-ids` | object ids are unique within a scene, and scene ids within the document |
+| `safe-ids` | every id is a lowercase identifier: `[a-z][a-z0-9_]*`, not a Python keyword |
 | `known-type` | `type` is in the table above |
 | `required-fields` | every required field for that type is present |
 | `reference-integrity` | every `target` / `into` names a declared object, and `plot.axes` a declared `axes` |
@@ -131,6 +132,13 @@ collects them rather than raising, so one repair round carries every defect
 instead of the first; anything it could not type is dropped from the document
 and reported, which is why a document with errors is a subset of what the
 model wrote and is never rendered in that state.
+
+`safe-ids` is the one rule here with a consequence outside the video. A scene
+id becomes a working directory and an object id becomes a local variable in
+the generated Python, so both are model-written text that ends up somewhere it
+can do damage -- an id of `../../elsewhere` writes outside the directory the
+run was given. Lowercase is not a style preference either: it is what keeps an
+id clear of Manim's CamelCase classes and its ALLCAPS colour constants.
 
 **Warnings** (recorded, may trigger `simplify_ir`, do not block rendering):
 
