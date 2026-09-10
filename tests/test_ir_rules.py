@@ -671,3 +671,43 @@ def test_the_estimator_tracks_what_manim_actually_produces():
     box = ir_rules.bounding_box(axes("ax"))
     assert box.width == pytest.approx(real_axes.width, abs=0.2)
     assert box.height == pytest.approx(real_axes.height, abs=0.2)
+
+
+def test_a_label_sitting_on_the_shape_it_labels_is_not_an_overlap():
+    # Measured on a real layout: every no-overlap warning it raised was a
+    # label or an arrow against the polygon it referred to. A warning drives
+    # simplify_ir, so a false one costs a scene that was right.
+    document = doc(
+        timed_scene(
+            [
+                ir.Polygon(id="tri", points=((-2.0, -1.0), (2.0, -1.0), (2.0, 2.0))),
+                text("label", (0.0, 0.0), "hypotenuse"),
+            ],
+            [step("create", "tri", duration=3.0), step("write", "label", duration=3.0)],
+        )
+    )
+    assert names(ir_rules.check_document(document)) == set()
+
+
+def test_two_shapes_overlapping_is_the_content_not_a_defect():
+    # The squares in a Pythagorean figure sit on the triangle's sides.
+    document = doc(
+        timed_scene(
+            [
+                ir.Polygon(id="tri", points=((-2.0, -1.0), (2.0, -1.0), (2.0, 2.0))),
+                ir.Rectangle(id="sq", center=(0.0, 0.0), width=3.0, height=3.0),
+            ],
+            [step("create", "tri", duration=3.0), step("create", "sq", duration=3.0)],
+        )
+    )
+    assert names(ir_rules.check_document(document)) == set()
+
+
+def test_overlapping_text_is_still_caught():
+    document = doc(
+        timed_scene(
+            [text("a", (0.0, 0.0), "hello"), ir.MathTex(id="b", content="x+y", position=(0.0, 0.0))],
+            [step("write", "a", duration=3.0), step("write", "b", duration=3.0)],
+        )
+    )
+    assert names(ir_rules.check_document(document)) == {"no-overlap"}

@@ -510,8 +510,17 @@ def no_overlap(scene: ir.Scene, where: str) -> Iterable[Issue]:
     boxes = {
         obj_id: box
         for obj_id, box in _boxes(scene).items()
-        # Axes and plots are backdrops that other objects are meant to sit on.
-        if not isinstance(declared[obj_id], (ir.Axes, ir.Plot))
+        # Text against text, and nothing else. The rule exists because
+        # overlapping text is the commonest way a generated scene looks
+        # broken, and every other pairing turned out to be either normal or
+        # the content itself: an axes is a backdrop drawn over by design, a
+        # label sits on the shape it labels, an arrow points *at* something,
+        # and in geometry two overlapping shapes are usually the argument --
+        # the squares in a Pythagorean figure sit on the triangle's sides.
+        # Measured on a real layout, every one of the five warnings raised was
+        # of that kind, and a false warning is not free: warnings drive
+        # simplify_ir, so it tears apart a scene that was right.
+        if isinstance(declared[obj_id], TEXTUAL)
     }
     reported: set[tuple[str, str]] = set()
 

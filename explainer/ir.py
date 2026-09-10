@@ -642,3 +642,149 @@ def _parse_step(raw: Any, where: str, issues: list[Issue]) -> Step | None:
     if broken:
         return None
     return Step(action=action, duration=duration, **fields)
+
+
+# ---------------------------------------------------------------------------
+# The IR's description of itself
+# ---------------------------------------------------------------------------
+
+#: The colour names Manim defines that this format uses. Not validated by a
+#: rule -- a wrong name fails at L1 with a NameError that says so -- but worth
+#: putting in the schema, where it costs nothing and prevents the invention of
+#: a LIGHT_BLUE that would only fail after a subprocess.
+COLORS = (
+    "WHITE",
+    "BLUE",
+    "YELLOW",
+    "GREEN",
+    "RED",
+    "ORANGE",
+    "PURPLE",
+    "GREY",
+)
+
+# Array length cannot be expressed here at all. Structured outputs accept
+# `minItems` only as 0 or 1, and reject `maxItems` outright -- both verified
+# against the API, each as its own 400. So a point is "an array of numbers"
+# and the exact count is left to the parser's `field-shape` rule, which
+# already checks it and names the field that was wrong. The schema pins the
+# vocabulary; the parser pins the arithmetic.
+_NUMBERS = {"type": "array", "items": {"type": "number"}}
+_POINT_SCHEMA = dict(_NUMBERS)
+_RANGE_SCHEMA = dict(_NUMBERS)
+
+
+def field_schema(name: str) -> dict[str, Any]:
+    """JSON Schema for one IR field, from the same table the parser coerces by.
+
+    One vocabulary, described once. A field added to a dataclass without an
+    entry in the coercer tables raises there, and reaches here as the same
+    error rather than as a silently permissive schema.
+    """
+    if name == "color":
+        return {"type": "string", "enum": list(COLORS)}
+    if name in _POINT_FIELDS:
+        return dict(_POINT_SCHEMA)
+    if name in _RANGE_FIELDS:
+        return dict(_RANGE_SCHEMA)
+    if name in _POINTS_FIELDS:
+        return {"type": "array", "items": dict(_POINT_SCHEMA), "minItems": 1}
+    if name in _FLOAT_FIELDS:
+        return {"type": "number"}
+    if name in _STR_FIELDS:
+        return {"type": "string"}
+    raise AssertionError(f"no schema registered for field {name!r}")
+
+
+def object_schema(cls: type[SceneObject]) -> dict[str, Any]:
+    """The shape of one object type, derived from its dataclass."""
+    required = set(_required_names(cls))
+    properties: dict[str, Any] = {"type": {"type": "string", "enum": [cls.TYPE]}}
+    for f in dc_fields(cls):
+        properties[f.name] = field_schema(f.name)
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["type", *sorted(required)],
+        "additionalProperties": False,
+    }
+
+
+def any_object_schema() -> dict[str, Any]:
+    """One shape covering every object type.
+
+    The precise form -- an ``anyOf`` over the nine ``object_schema`` variants
+    -- is what this should be, and the API will not compile it: nine tagged
+    variants inside a scene array inside a document array is rejected with
+    "the compiled grammar is too large". Verified, not assumed.
+
+    So the schema pins the vocabulary (which types exist, which field names
+    exist, which colours) and the parser pins the rest. A circle arriving with
+    a ``content`` and no ``radius`` is caught by `required-fields` and
+    `unknown-field`, both of which already exist and are already tested; the
+    preamble states the per-type requirements so it rarely comes to that.
+    """
+    properties: dict[str, Any] = {
+        "type": {"type": "string", "enum": sorted(OBJECT_TYPES)}
+    }
+    for cls in OBJECT_TYPES.values():
+        for f in dc_fields(cls):
+            properties.setdefault(f.name, field_schema(f.name))
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["type", "id"],
+        "additionalProperties": False,
+    }
+
+
+def step_schema() -> dict[str, Any]:
+    """One shape for every action.
+
+    Not a variant per action: the differences are two optional fields, and
+    eight near-identical branches would cost more tokens on every call than
+    the `required-fields` rule costs when it fires.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": [a.value for a in Action]},
+            "duration": {"type": "number"},
+            "target": {"type": "string"},
+            "into": {"type": "string"},
+            "to": dict(_POINT_SCHEMA),
+        },
+        "required": ["action", "duration"],
+        "additionalProperties": False,
+    }
+
+
+def scene_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "narration": {"type": "string"},
+            "objects": {
+                "type": "array",
+                "items": any_object_schema(),
+                "minItems": 1,
+            },
+            "steps": {"type": "array", "items": step_schema(), "minItems": 1},
+        },
+        "required": ["id", "narration", "objects", "steps"],
+        "additionalProperties": False,
+    }
+
+
+def document_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "version": {"type": "string", "enum": [VERSION]},
+            "title": {"type": "string"},
+            "scenes": {"type": "array", "items": scene_schema(), "minItems": 1},
+        },
+        "required": ["version", "title", "scenes"],
+        "additionalProperties": False,
+    }

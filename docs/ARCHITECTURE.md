@@ -170,8 +170,9 @@ MathExplainer/
     validate.py           done -- L0/L1/L2/L3 code checks
     llm.py                Anthropic client, retries, token accounting
     plan.py               Prompt -> LessonPlan
-    ir.py                 LessonPlan -> SceneIR; IR dataclasses
+    ir.py                 IR dataclasses, parser, and its own JSON schema
     ir_rules.py           IR validation rules (pure functions)
+    layout.py             LessonPlan -> SceneIR
     codegen.py            IR scene -> Manim source
     spine.py              document -> mp4, with no agent around it
     repair.py             repair + escalation ladder

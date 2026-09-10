@@ -145,7 +145,7 @@ id clear of Manim's CamelCase classes and its ALLCAPS colour constants.
 | Rule | Check | Why |
 |---|---|---|
 | `in-frame` | every position / point within `|x| <= 6.6`, `|y| <= 3.6` | objects placed off the edge are invisible in the output but render without error |
-| `no-overlap` | approximate bounding boxes of simultaneously-visible objects do not intersect | overlapping text is the single most common way a generated scene looks broken |
+| `no-overlap` | approximate bounding boxes of simultaneously-visible `text`/`mathtex` do not intersect | overlapping text is the single most common way a generated scene looks broken; every other pairing is normal or is the content itself |
 | `unknown-field` | a field the object type or action does not use | usually the model confusing two types; the value is reported and dropped rather than silently carried |
 | `pacing` | `len(narration.split()) / 150 * 60` within 30% of `sum(step durations)` | narration and animation drift apart; 150 wpm is a normal explainer pace |
 | `scene-length` | total duration between 5 s and 90 s | very short scenes look like glitches, very long ones lose the viewer |
@@ -178,6 +178,13 @@ values in the table sit just above the means, because an estimate slightly too
 large turns a near miss into a warning while one that is too large by a factor
 of two turns every scene into one. `tests/test_ir_rules.py` re-measures against
 manim, so these do not quietly rot.
+
+`no-overlap` compares text against text and nothing else. Measured on a real
+generated layout, every warning it raised was a label or an arrow against the
+polygon it referred to -- and a label sits on the shape it labels, an arrow
+points at something, and two overlapping shapes in geometry are usually the
+argument rather than a mistake. A false warning is not free, because warnings
+drive `simplify_ir`: it would tear apart a scene that was right.
 
 Two corrections worth stating separately. **Axes do not take their size from
 `x_range` / `y_range`** -- manim sizes them from the frame and uses the range

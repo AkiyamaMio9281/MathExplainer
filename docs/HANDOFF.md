@@ -90,6 +90,26 @@ Omit it from the allowlist and the sandbox fails with
 install rather than a missing environment variable. It is in the allowlist now,
 with a comment; do not "tidy it away".
 
+**Structured outputs compile the schema into a grammar, and it has a ceiling.**
+Four separate 400s, each with its own message, found while building the layout
+stage:
+
+- `minItems` is accepted only as `0` or `1`; any other value is rejected by
+  value.
+- `maxItems` is not supported at all.
+- `additionalProperties` must be present on every object and must be `false`.
+  An open object is not available, so a schema cannot say "these fields, plus
+  whatever else".
+- Size is the real limit. A nine-way tagged union of the IR's object types is
+  "the compiled grammar is too large" at document *and* scene level; so is
+  seven. Six compiles, at about 3.5 kB of schema JSON. Merging the nine into
+  one object with every field optional is "Schema is too complex" -- the cost
+  is in the optional properties, not the nesting.
+
+`explainer/layout.py` works in six of the nine types because of that last one,
+and `tests/test_layout.py` pins the size so widening the vocabulary fails
+locally rather than as a 400 mid-run.
+
 **The console is cp1252.** Any subprocess printing non-ASCII dies with
 `UnicodeEncodeError`. `sandbox.py` sets `PYTHONIOENCODING=utf-8` for children.
 Set it yourself when running ad-hoc scripts that print anything but ASCII.
