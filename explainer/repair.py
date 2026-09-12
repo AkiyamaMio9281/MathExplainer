@@ -44,11 +44,12 @@ that.
 
 from __future__ import annotations
 
+import time
 from collections import Counter
-from dataclasses import dataclass, replace
-from typing import Callable
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable
 
-from . import ir, ir_rules
+from . import codegen, ir, ir_rules, llm
 from .codegen import repair as repair_code  # noqa: F401  -- the other rung
 
 #: At most this many objects survive reduction 3.
@@ -346,3 +347,247 @@ def simplify(scene: ir.Scene, from_stage: int = 0) -> Simplification:
             return Simplification(reduced, index, what)
 
     return Simplification(None, len(STAGES), "already as simple as it goes")
+
+
+# ---------------------------------------------------------------------------
+# The escalation ladder
+# ---------------------------------------------------------------------------
+
+#: Repairs allowed per version of the IR, feeding the traceback back each time.
+REPAIR_ROUNDS = 3
+
+#: Simplifications allowed per scene. Each one starts a fresh cycle, so the
+#: worst case is (1 + SIMPLIFY_ROUNDS) * (1 + REPAIR_ROUNDS) model calls --
+#: twelve at the defaults. That number is why the agent carries a budget on top
+#: of these bounds rather than trusting them alone.
+SIMPLIFY_ROUNDS = 2
+
+RENDERED = "rendered"
+DROPPED = "dropped"
+
+CODEGEN = "codegen"
+REPAIRED = "repair"
+SIMPLIFIED = "simplify"
+RENDER = "render"
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """One action and what came of it. The raw material for the metrics."""
+
+    kind: str
+    stage: int  # which simplification the scene is on; 0 is what was asked for
+    round: int  # repair round within that stage
+    ok: bool
+    error: str = ""
+    level: str = ""  # the tier that rejected it, when one did
+    seconds: float = 0.0
+    usage: llm.Usage = field(default_factory=llm.Usage)
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class Outcome:
+    scene_id: str
+    status: str
+    scene: ir.Scene
+    attempts: tuple[Attempt, ...] = ()
+    code: str = ""
+    check: Any = None
+    video: Any = None
+    usage: llm.Usage = field(default_factory=llm.Usage)
+    seconds: float = 0.0
+    error: str = ""
+
+    @property
+    def rendered(self) -> bool:
+        return self.status == RENDERED
+
+    @property
+    def repairs(self) -> int:
+        return sum(1 for a in self.attempts if a.kind == REPAIRED)
+
+    @property
+    def simplifications(self) -> int:
+        return sum(1 for a in self.attempts if a.kind == SIMPLIFIED and a.ok)
+
+    @property
+    def calls(self) -> int:
+        """Model calls. A simplification is arithmetic, not a call."""
+        return sum(1 for a in self.attempts if a.kind in (CODEGEN, REPAIRED))
+
+    def trail(self) -> str:
+        return " -> ".join(
+            a.kind + ("" if a.ok else " x") + (f"({a.detail})" if a.detail else "")
+            for a in self.attempts
+        )
+
+
+@dataclass(frozen=True)
+class Tools:
+    """The four actions the ladder drives.
+
+    Injectable, so the control flow can be tested without a model, a
+    subprocess or a renderer. The ordering and the bounds are the whole point
+    of this module, and neither needs manim to be exercised.
+    """
+
+    generate: Callable[..., tuple[str, llm.Reply]]
+    repair: Callable[..., tuple[str, llm.Reply]]
+    validate: Callable[..., Any]
+    render: Callable[..., Any]
+
+
+def default_tools() -> Tools:
+    from .validate import Level
+    from .validate import render as render_file
+    from .validate import validate as validate_code
+
+    return Tools(
+        generate=lambda client, scene, title: codegen.generate(
+            client, scene, title=title
+        ),
+        repair=lambda client, code, error: codegen.repair(client, code, error),
+        validate=lambda workdir, code: validate_code(workdir, code, up_to=Level.DRYRUN),
+        render=lambda workdir, name, quality: render_file(
+            workdir, name, quality=quality
+        ),
+    )
+
+
+def climb(
+    scene: ir.Scene,
+    workdir: Any,
+    client: Any,
+    *,
+    title: str = "",
+    quality: str = "l",
+    repair_rounds: int = REPAIR_ROUNDS,
+    simplify_rounds: int = SIMPLIFY_ROUNDS,
+    tools: Tools | None = None,
+) -> Outcome:
+    """Take one scene as far up the ladder as it needs, and no further.
+
+    Generate, validate, and on failure repair the code with the traceback fed
+    back verbatim. When the repairs run out, simplify the IR and start again
+    from a scene that asks for less. When the simplifications run out, drop the
+    scene and say why: a lesson missing one scene and carrying a note about it
+    is a usable result, and an exception four minutes into a render is not.
+
+    Every rung is bounded and every action is recorded. `Outcome.attempts` is
+    the log the metrics are computed from, and it is kept whether the scene
+    rendered or not -- a scene that took three repairs is as interesting as one
+    that was dropped.
+    """
+    tools = tools or default_tools()
+    started = time.perf_counter()
+    attempts: list[Attempt] = []
+    usage = llm.Usage()
+    current = scene
+    stage = 0
+    simplifications = 0
+
+    def finish(status: str, *, error: str = "", code: str = "", check=None, video=None):
+        return Outcome(
+            scene_id=scene.id,
+            status=status,
+            scene=current,
+            attempts=tuple(attempts),
+            code=code,
+            check=check,
+            video=video,
+            usage=usage,
+            seconds=time.perf_counter() - started,
+            error=error,
+        )
+
+    while True:
+        code = ""
+        check = None
+        failure = ""
+
+        for round_number in range(repair_rounds + 1):
+            kind = CODEGEN if round_number == 0 else REPAIRED
+            call_started = time.perf_counter()
+            try:
+                if round_number == 0:
+                    code, reply = tools.generate(client, current, title)
+                else:
+                    code, reply = tools.repair(client, code, failure)
+            except llm.LLMError as exc:
+                # Truncation especially: a scene that asks for less produces a
+                # shorter file, so simplifying is the useful answer rather than
+                # asking the same question again.
+                attempts.append(
+                    Attempt(
+                        kind,
+                        stage,
+                        round_number,
+                        False,
+                        error=f"{type(exc).__name__}: {exc}",
+                        seconds=time.perf_counter() - call_started,
+                    )
+                )
+                failure = str(exc)
+                check = None
+                break
+
+            usage = usage + reply.usage
+            check = tools.validate(workdir, code)
+            failure = getattr(check, "error", "") or ""
+            attempts.append(
+                Attempt(
+                    kind,
+                    stage,
+                    round_number,
+                    bool(getattr(check, "ok", False)),
+                    error=failure,
+                    level=getattr(getattr(check, "level", None), "name", ""),
+                    seconds=time.perf_counter() - call_started,
+                    usage=reply.usage,
+                )
+            )
+            if getattr(check, "ok", False):
+                break
+
+        if check is not None and getattr(check, "ok", False):
+            produced = tools.render(
+                workdir, getattr(check, "scene_name", "") or "", quality
+            )
+            if getattr(produced, "ok", False):
+                return finish(
+                    RENDERED,
+                    code=code,
+                    check=produced,
+                    video=getattr(produced, "output", None),
+                )
+            # A scene that runs but will not rasterise is usually asking for
+            # too much, and that is what simplification is for -- not another
+            # repair of code which already executes.
+            failure = getattr(produced, "error", "") or "the render failed"
+            attempts.append(
+                Attempt(RENDER, stage, 0, False, error=failure, level="RENDER")
+            )
+
+        if simplifications >= simplify_rounds:
+            return finish(
+                DROPPED,
+                error=(
+                    f"still failing after {simplifications} simplification(s) "
+                    f"and {repair_rounds} repairs a time: {failure}"
+                ),
+                code=code,
+            )
+
+        reduced = simplify(current, from_stage=stage)
+        attempts.append(
+            Attempt(SIMPLIFIED, stage, 0, not reduced.exhausted, detail=reduced.what)
+        )
+        if reduced.exhausted:
+            return finish(
+                DROPPED,
+                error=f"cannot be simplified further ({reduced.what}): {failure}",
+                code=code,
+            )
+        current, stage = reduced.scene, reduced.stage + 1
+        simplifications += 1
