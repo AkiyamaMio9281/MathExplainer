@@ -8,6 +8,11 @@ venv/
 media/
 *.mp4
 
+# ...except the one sample lesson kept as evidence that the thing works.
+# Checked in deliberately: it is 2 MB, it never changes, and a pipeline whose
+# output nobody can watch is a claim rather than a demonstration.
+!docs/examples/*.mp4
+
 # Pipeline artifacts
 runs/
 out/

@@ -38,6 +38,11 @@ subtitles, timed to each scene's rendered length, so the words reach the
 viewer without speech turning scene length into an output of a synthesiser.
 `--no-subtitles` leaves it silent.
 
+A finished lesson is checked in at
+[`docs/examples/primes.mp4`](docs/examples/primes.mp4) -- 344 seconds, six
+scenes, subtitles. A pipeline whose output nobody can watch is a claim rather
+than a demonstration.
+
 | Component | State |
 |---|---|
 | `sandbox.py` -- isolated subprocess execution | done |
