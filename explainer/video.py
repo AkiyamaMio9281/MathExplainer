@@ -22,7 +22,11 @@ a lesson that renders is worth more than a clean error about a frame rate.
 
 There is no audio track. Narration is text in the IR, so every stream is
 video-only, and the concat filter is told so explicitly -- ``a=0`` rather than
-letting ffmpeg look for audio that is not there.
+letting ffmpeg look for audio that is not there. The words reach the viewer as
+burned-in subtitles instead, which is why this module builds SRT: a silent
+animation is not an explainer, and subtitles buy the words without the timing
+inversion that speech would bring -- with speech, a scene's length becomes an
+output of the synthesiser rather than an input to the layout.
 
 Subprocesses go through ``sandbox.run``, so ffmpeg gets the same allowlisted
 environment as generated Python. It has no business reading an API key either.
@@ -38,6 +42,7 @@ remembered.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -249,3 +254,194 @@ def _result(done: Completed, output: Path, method: str) -> Concatenated:
             error="ffmpeg exited 0 but produced no video",
         )
     return Concatenated(True, output=output, method=method, seconds=done.seconds)
+
+
+# ---------------------------------------------------------------------------
+# Subtitles
+# ---------------------------------------------------------------------------
+
+#: Words in one subtitle. Long enough to read as a phrase, short enough that a
+#: line does not sit on screen after the animation has moved on.
+WORDS_PER_CUE = 12
+
+#: Characters before a cue wraps onto a second line.
+WRAP_AT = 42
+
+#: Sentence ends, for splitting narration before word count gets a say. A
+#: cue running from the middle of one sentence into the middle of the next
+#: is a caption only in the technical sense.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+NEWLINE = "\n"
+
+
+@dataclass(frozen=True)
+class Cue:
+    start: float
+    end: float
+    text: str
+
+
+def _timestamp(seconds: float) -> str:
+    seconds = max(seconds, 0.0)
+    whole = int(seconds)
+    milliseconds = int(round((seconds - whole) * 1000))
+    if milliseconds == 1000:  # rounding up should not produce ",1000"
+        whole, milliseconds = whole + 1, 0
+    return (
+        f"{whole // 3600:02d}:{whole % 3600 // 60:02d}:"
+        f"{whole % 60:02d},{milliseconds:03d}"
+    )
+
+
+def _wrap(text: str, width: int = WRAP_AT) -> str:
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) <= 2:
+        return NEWLINE.join(lines)
+    # Never more than two lines: a third covers the animation it describes.
+    return NEWLINE.join([" ".join(lines[:-1]), lines[-1]])
+
+
+def cues_for(
+    narration: str,
+    start: float,
+    duration: float,
+    words_per_cue: int = WORDS_PER_CUE,
+) -> list[Cue]:
+    """Split one scene's narration across the time that scene actually runs.
+
+    Time is shared out by word count, so a long phrase stays up longer than a
+    short one. *duration* is the rendered clip's length rather than the IR's
+    requested one: what was asked for and what manim produced differ slightly
+    every scene, and over five scenes that drift is enough to put a line under
+    the wrong animation.
+    """
+    words = narration.split()
+    if not words or duration <= 0:
+        return []
+
+    chunks = _split(narration, words_per_cue)
+    cues: list[Cue] = []
+    spent = 0.0
+    for index, chunk in enumerate(chunks):
+        # The last cue takes whatever is left, so rounding cannot leave a gap
+        # at the end of the scene or run past it.
+        end = duration if index == len(chunks) - 1 else spent + duration * len(chunk) / len(words)
+        cues.append(Cue(start + spent, start + end, _wrap(" ".join(chunk))))
+        spent = end
+    return cues
+
+
+def _split(narration: str, words_per_cue: int) -> list[list[str]]:
+    """Sentences first, word count second.
+
+    Splitting purely by count produced lines like "rows of three. Twelve
+    is flexible. Now take seven dots and try" -- three fragments of three
+    different sentences, read off a real frame of a real run. A sentence
+    shorter than the limit becomes one cue whatever its length; a longer
+    one is broken up, and only then by count.
+    """
+    chunks: list[list[str]] = []
+    for sentence in _SENTENCE_END.split(narration.strip()):
+        words = sentence.split()
+        if not words:
+            continue
+        for index in range(0, len(words), words_per_cue):
+            chunks.append(words[index : index + words_per_cue])
+    return chunks
+
+
+def cues_from(scenes: Sequence[tuple[str, float]]) -> list[Cue]:
+    """Lay several scenes' narration end to end on one timeline."""
+    cues: list[Cue] = []
+    at = 0.0
+    for narration, duration in scenes:
+        cues.extend(cues_for(narration, at, duration))
+        at += max(duration, 0.0)
+    return cues
+
+
+def to_srt(cues: Sequence[Cue]) -> str:
+    blocks = [
+        f"{number}{NEWLINE}{_timestamp(cue.start)} --> {_timestamp(cue.end)}"
+        f"{NEWLINE}{cue.text}{NEWLINE}"
+        for number, cue in enumerate(cues, start=1)
+    ]
+    return NEWLINE.join(blocks)
+
+
+def subtitle(
+    video_path: Path, cues: Sequence[Cue], timeout: float = 900.0
+) -> Concatenated:
+    """Burn *cues* into *video_path*, in place.
+
+    In place because the lesson should have one name whether it carries
+    subtitles or not, and ffmpeg cannot read and write the same file -- so it
+    writes a neighbour and replaces.
+
+    The filter references the subtitle file by bare name, with the child's cwd
+    set to the directory holding it. A filtergraph parses its own argument, so
+    a Windows path inside one needs both its backslashes and the colon after
+    the drive letter escaped; a chdir sidesteps the whole question.
+    """
+    if not cues:
+        return Concatenated(False, method="subtitles", error="no narration to burn")
+    if not video_path.is_file():
+        return Concatenated(False, method="subtitles", error=f"missing: {video_path}")
+    if not available():
+        return Concatenated(False, method="subtitles", error="ffmpeg is not on PATH")
+
+    video_path = video_path.resolve()
+    srt = video_path.with_suffix(".srt")
+    burned = video_path.with_name(f"{video_path.stem}-subtitled.mp4")
+    srt.write_text(to_srt(cues), encoding="utf-8")
+
+    done = run(
+        [
+            FFMPEG,
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"subtitles={srt.name}:force_style='Fontsize=16,MarginV=24'",
+            "-pix_fmt",
+            "yuv420p",
+            str(burned),
+        ],
+        cwd=srt.parent,
+        timeout=timeout,
+    )
+    srt.unlink(missing_ok=True)
+
+    if not done.ok or not burned.is_file() or burned.stat().st_size == 0:
+        burned.unlink(missing_ok=True)
+        return Concatenated(
+            False, method="subtitles", seconds=done.seconds, error=done.failure_text()
+        )
+
+    burned.replace(video_path)
+    return Concatenated(
+        True, output=video_path, method="subtitles", seconds=done.seconds
+    )
+
+
+def subtitle_lesson(
+    video_path: Path, scenes: Sequence[tuple[str, Path]], timeout: float = 900.0
+) -> Concatenated:
+    """Burn the narration of *scenes* onto the joined lesson.
+
+    Each scene is timed by its own clip's measured length rather than by what
+    the IR asked for, so the lines stay under the animation they describe.
+    """
+    timed = [(narration, duration(clip) or 0.0) for narration, clip in scenes]
+    return subtitle(video_path, cues_from(timed), timeout=timeout)

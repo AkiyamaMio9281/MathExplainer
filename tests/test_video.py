@@ -225,3 +225,179 @@ def test_relative_clip_paths_work(tmp_path, monkeypatch):
     assert result.ok, result.error
     assert video.probe(Path("runs/lesson/lesson.mp4")) is not None
     assert video.duration(clips[0]) == pytest.approx(1.0, abs=0.3)
+
+
+# ---------------------------------------------------------------------------
+# Subtitles
+# ---------------------------------------------------------------------------
+
+
+def test_a_scene_is_split_into_readable_cues():
+    cues = video.cues_for("one two three " * 10, start=0.0, duration=30.0)
+
+    assert len(cues) == 3  # thirty words at twelve to a cue
+    assert all(len(c.text.split()) <= video.WORDS_PER_CUE for c in cues)
+
+
+def test_time_is_shared_out_by_word_count():
+    # A long phrase stays up longer than a short one.
+    cues = video.cues_for("a " * 18, start=0.0, duration=30.0)
+
+    first, second = cues
+    assert (first.end - first.start) == pytest.approx(20.0)
+    assert (second.end - second.start) == pytest.approx(10.0)
+
+
+def test_the_last_cue_lands_exactly_on_the_end_of_the_scene():
+    # Exactly, not approximately. The last cue is given what is left rather
+    # than its proportional share, because four float shares that should sum
+    # to the duration do not, and a subtitle that outlasts its clip by a
+    # rounding error is a subtitle over the next scene.
+    # 14 words over 45.7s is one of the 577 combinations in a 1393-case sweep
+    # where the naive sum lands on 45.70000000000001 instead.
+    cues = video.cues_for("word " * 14, start=0.0, duration=45.7)
+
+    assert cues[0].start == 0.0
+    assert cues[-1].end == 45.7
+
+
+def test_scenes_are_laid_end_to_end():
+    cues = video.cues_from([("first scene words", 4.0), ("second scene words", 6.0)])
+
+    assert cues[0].start == 0.0
+    assert cues[0].end == pytest.approx(4.0)
+    assert cues[-1].end == pytest.approx(10.0)
+
+
+def test_a_scene_with_no_narration_contributes_nothing_but_still_advances_time():
+    cues = video.cues_from([("", 4.0), ("spoken words here", 6.0)])
+
+    assert len(cues) == 1
+    assert cues[0].start == pytest.approx(4.0)
+
+
+def test_a_scene_of_no_length_is_skipped_rather_than_dividing_by_zero():
+    assert video.cues_for("some words", start=0.0, duration=0.0) == []
+
+
+def test_a_long_cue_wraps_onto_at_most_two_lines():
+    # A third line covers the animation it is describing.
+    cue = video.cues_for("supercalifragilistic " * 12, 0.0, 10.0)[0]
+
+    assert cue.text.count("\n") <= 1
+
+
+def test_the_srt_is_shaped_the_way_players_expect():
+    text = video.to_srt(video.cues_from([("hello there", 2.5)]))
+
+    assert text.startswith("1\n00:00:00,000 --> 00:00:02,500\nhello there")
+
+
+def test_timestamps_round_without_producing_a_thousand_milliseconds():
+    # 0.9999 rounds to 1000ms, which is not a timestamp.
+    text = video.to_srt([video.Cue(0.0, 0.9999, "x")])
+
+    assert "00:00:01,000" in text
+    assert ",1000" not in text
+
+
+@pytest.mark.slow
+def test_burning_subtitles_replaces_the_lesson_in_place(tmp_path):
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    before = clip.stat().st_size
+
+    result = video.subtitle(clip, video.cues_from([("a spoken line", 2.0)]))
+
+    assert result.ok, result.error
+    assert result.method == "subtitles"
+    # Same name, different bytes, still a video of the same length.
+    assert result.output == clip.resolve()
+    assert clip.stat().st_size != before
+    assert video.duration(clip) == pytest.approx(2.0, abs=0.3)
+
+
+@pytest.mark.slow
+def test_the_subtitle_file_does_not_survive_the_run(tmp_path):
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=1.0)
+    video.subtitle(clip, video.cues_from([("a line", 1.0)]))
+
+    assert not list(tmp_path.glob("*.srt"))
+    assert not list(tmp_path.glob("*-subtitled.mp4"))
+
+
+@pytest.mark.slow
+def test_a_path_with_spaces_and_a_drive_letter_still_burns(tmp_path):
+    # A filtergraph parses its own argument, so a Windows path inside one needs
+    # its backslashes and its drive-letter colon escaped. The filter is handed
+    # a bare filename with cwd set alongside it instead.
+    room = tmp_path / "a directory with spaces"
+    clip = make_clip(room / "the lesson.mp4", seconds=1.0)
+
+    result = video.subtitle(clip, video.cues_from([("a line", 1.0)]))
+
+    assert result.ok, result.error
+
+
+@pytest.mark.slow
+def test_subtitle_lesson_times_itself_to_the_clips_that_were_rendered(tmp_path):
+    # Not to what the IR asked for: what was requested and what manim produced
+    # differ a little every scene, and the drift accumulates.
+    first = make_clip(tmp_path / "a.mp4", seconds=1.0)
+    second = make_clip(tmp_path / "b.mp4", seconds=3.0)
+    joined = video.concat([first, second], tmp_path / "lesson.mp4")
+
+    result = video.subtitle_lesson(
+        joined.output, [("first words", first), ("second words", second)]
+    )
+
+    assert result.ok, result.error
+
+
+def test_nothing_to_say_is_refused_without_starting_ffmpeg(tmp_path):
+    result = video.subtitle(tmp_path / "missing.mp4", [])
+
+    assert not result.ok
+    assert "no narration" in result.error
+
+
+@pytest.mark.slow
+def test_a_failed_burn_leaves_the_original_lesson_untouched(tmp_path):
+    # Losing the subtitles must not lose the lesson.
+    clip = tmp_path / "lesson.mp4"
+    clip.write_bytes(b"not a video")
+
+    result = video.subtitle(clip, video.cues_from([("a line", 1.0)]))
+
+    assert not result.ok
+    assert clip.read_bytes() == b"not a video"
+    assert not list(tmp_path.glob("*-subtitled.mp4"))
+
+
+def test_a_cue_does_not_run_across_a_sentence_boundary():
+    # Read off a real frame before this existed: "rows of three. Twelve is
+    # flexible. Now take seven dots and try" -- three fragments of three
+    # different sentences, which is a caption only in the technical sense.
+    narration = (
+        "Twelve dots can be four rows of three. Twelve is flexible. "
+        "Now take seven dots and try to make a rectangle."
+    )
+    cues = video.cues_for(narration, 0.0, 20.0)
+
+    assert [c.text.replace(video.NEWLINE, " ") for c in cues] == [
+        "Twelve dots can be four rows of three.",
+        "Twelve is flexible.",
+        "Now take seven dots and try to make a rectangle.",
+    ]
+
+
+def test_a_sentence_longer_than_the_limit_is_still_broken_up():
+    cues = video.cues_for("word " * 30, 0.0, 10.0)
+
+    assert len(cues) == 3
+    assert all(len(c.text.split()) <= video.WORDS_PER_CUE for c in cues)
+
+
+def test_a_short_sentence_stays_whole_however_short():
+    cues = video.cues_for("Yes. No. Maybe so.", 0.0, 6.0)
+
+    assert [c.text for c in cues] == ["Yes.", "No.", "Maybe so."]

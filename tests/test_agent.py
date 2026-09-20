@@ -85,6 +85,7 @@ class Stub:
         scene_cost=0.01,
         fails: set[str] = frozenset(),
         join_ok=True,
+        burn_ok=True,
     ):
         self.plan_value = plan if plan is not None else lesson()
         self.plan_issues = plan_issues
@@ -94,6 +95,8 @@ class Stub:
         self.scene_cost = scene_cost
         self.fails = set(fails)
         self.join_ok = join_ok
+        self.burn_ok = burn_ok
+        self.subtitled: list[str] = []
         self.calls: list[str] = []
         self.climbed: list[str] = []
 
@@ -133,8 +136,16 @@ class Stub:
         self.calls.append("concat")
         return Joined(ok=self.join_ok, output=out, error="" if self.join_ok else "mismatch")
 
+    def subtitle(self, video_path, scenes, **kwargs):
+        self.calls.append("subtitle")
+        self.subtitled = [n for n, _ in scenes]
+        return Joined(ok=self.burn_ok, output=video_path,
+                      error="" if self.burn_ok else "libass said no")
+
     def stages(self) -> agent.Stages:
-        return agent.Stages(self.plan, self.layout, self.retry, self.climb, self.concat)
+        return agent.Stages(
+            self.plan, self.layout, self.retry, self.climb, self.concat, self.subtitle
+        )
 
 
 def run(stub: Stub, tmp_path, **kwargs) -> agent.Run:
@@ -150,9 +161,12 @@ def test_the_stages_run_in_order_and_once_each(tmp_path):
     stub = Stub()
     state = run(stub, tmp_path)
 
-    assert stub.calls == ["plan", "layout", "climb:one", "climb:two", "concat"]
+    assert stub.calls == [
+        "plan", "layout", "climb:one", "climb:two", "concat", "subtitle"
+    ]
     assert state.ok
     assert state.video == tmp_path / "lesson.mp4"
+    assert state.subtitled
 
 
 def test_each_scene_gets_its_own_directory(tmp_path):
@@ -217,7 +231,9 @@ def test_a_layout_fixed_on_the_retry_carries_on(tmp_path):
     )
     state = run(stub, tmp_path)
 
-    assert stub.calls == ["plan", "layout", "retry", "climb:one", "climb:two", "concat"]
+    assert stub.calls == [
+        "plan", "layout", "retry", "climb:one", "climb:two", "concat", "subtitle"
+    ]
     assert state.ok
     assert state.layout_attempts == 2
 
@@ -469,3 +485,45 @@ def test_a_large_ceiling_streams_rather_than_risking_a_timeout():
     # Thinking is billed as output, so a layout can exhaust the default before
     # writing anything; the larger ceiling is only safe because it streams.
     assert layout_stage.MAX_TOKENS > llm.STREAM_ABOVE
+
+
+# ---------------------------------------------------------------------------
+# Subtitles
+# ---------------------------------------------------------------------------
+
+
+def test_the_narration_reaches_the_viewer(tmp_path):
+    # The words decided how long every scene runs and then, until now, never
+    # reached anyone. A silent animation is not an explainer.
+    stub = Stub()
+    state = run(stub, tmp_path)
+
+    assert state.subtitled
+    assert stub.subtitled == ["word " * 40, "word " * 40]
+
+
+def test_only_the_scenes_that_rendered_are_subtitled(tmp_path):
+    # A dropped scene has no clip to time its lines against, and captioning it
+    # would slide every later line out from under its animation.
+    stub = Stub(plan=lesson("a", "b", "c"), doc=document("a", "b", "c"), fails={"b"})
+    run(stub, tmp_path)
+
+    assert len(stub.subtitled) == 2
+
+
+def test_losing_the_subtitles_does_not_lose_the_lesson(tmp_path):
+    state = run(Stub(burn_ok=False), tmp_path)
+
+    assert state.ok
+    assert state.video is not None
+    assert not state.subtitled
+    assert "subtitles were not burned in" in state.error
+    assert "(no subtitles)" in state.summary()
+
+
+def test_subtitles_can_be_turned_off(tmp_path):
+    stub = Stub()
+    state = run(stub, tmp_path, subtitles=False)
+
+    assert "subtitle" not in stub.calls
+    assert state.ok and not state.subtitled

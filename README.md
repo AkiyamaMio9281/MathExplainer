@@ -33,6 +33,11 @@ repairs and no simplifications, 328 s and $0.70 for 226 s of video. One run is
 not a success rate -- the ablations that turn these into an argument are still
 to come -- but every stage is built and every one has tests.
 
+The lesson has no audio. The narration the plan wrote is burned in as
+subtitles, timed to each scene's rendered length, so the words reach the
+viewer without speech turning scene length into an output of a synthesiser.
+`--no-subtitles` leaves it silent.
+
 | Component | State |
 |---|---|
 | `sandbox.py` -- isolated subprocess execution | done |
@@ -43,7 +48,7 @@ to come -- but every stage is built and every one has tests.
 | `layout.py` -- lesson plan to Scene IR | done |
 | `codegen.py` -- IR scene to Manim source | done |
 | `repair.py` -- repair, simplification, escalation ladder | done |
-| `video.py` -- ffmpeg concatenation | done |
+| `video.py` -- ffmpeg concatenation and burned-in subtitles | done |
 | `agent.py` -- state, dispatch, dollar budget | done |
 | `metrics.py` -- attempt log and run summary | done |
 | `cli.py` -- prompt in, mp4 out | done |

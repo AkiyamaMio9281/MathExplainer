@@ -364,9 +364,20 @@ a key.
 
 ## 8. Open questions
 
-- **Narration is text only.** No TTS, no audio track. Adding it inverts the
-  timing relationship: `duration` becomes an output of the TTS rather than an
-  input to it, and the `pacing` rule becomes an error rather than a warning.
+- **Narration is burned in as subtitles, not spoken.** There is no audio
+  track. The words reach the viewer, which they did not before -- a silent
+  animation whose scene lengths were decided by narration nobody could read
+  is not an explainer. Adding speech is still open, and still inverts the
+  timing relationship: `duration` becomes an output of the synthesiser
+  rather than an input to the layout, and `pacing` becomes an error rather
+  than a warning.
+- **Nothing acts on a layout warning.** `in-frame` and `no-overlap` fire on
+  real runs -- five and three times in two of them -- and are recorded and
+  then ignored. SCENE_IR.md says they may drive `simplify_ir`; the ladder
+  only simplifies when code fails to compile, never when a scene compiles
+  into something that looks wrong. That is the gap between a lesson that
+  renders and a lesson worth watching, and the ablations should measure it
+  before anything is built to close it.
 - **Parallel scene rendering** is possible by construction (independent
   workdirs) but not implemented. Worth doing once render time is the
   bottleneck, and it makes a good profiling result.

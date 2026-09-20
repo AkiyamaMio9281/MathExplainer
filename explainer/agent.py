@@ -90,6 +90,7 @@ class Run:
     seconds: float = 0.0
     stopped: str = ""
     error: str = ""
+    subtitled: bool = False
 
     @property
     def rendered(self) -> tuple[repair.Outcome, ...]:
@@ -117,7 +118,10 @@ class Run:
         if self.stopped:
             lines.append(f"  !! stopped early -- {self.stopped}")
         if self.video:
-            lines.append(f"  -> {self.video}")
+            lines.append(
+                f"  -> {self.video}"
+                + ("" if self.subtitled else "  (no subtitles)")
+            )
         elif self.error:
             lines.append(f"  !! {self.error}")
         return "\n".join(lines)
@@ -132,6 +136,7 @@ class Stages:
     retry: Callable[..., tuple[ir.Document | None, tuple[Issue, ...], llm.Reply]]
     climb: Callable[..., repair.Outcome]
     concat: Callable[..., object]
+    subtitle: Callable[..., object]
 
 
 def default_stages() -> Stages:
@@ -141,6 +146,7 @@ def default_stages() -> Stages:
         retry=layout.retry,
         climb=repair.climb,
         concat=video.concat,
+        subtitle=video.subtitle_lesson,
     )
 
 
@@ -151,6 +157,7 @@ def run(
     *,
     budget: Budget | None = None,
     quality: str = "l",
+    subtitles: bool = True,
     repair_rounds: int = repair.REPAIR_ROUNDS,
     simplify_rounds: int = repair.SIMPLIFY_ROUNDS,
     stages: Stages | None = None,
@@ -252,7 +259,25 @@ def run(
     joined = stages.concat(clips, workdir / "lesson.mp4")
     if not getattr(joined, "ok", False):
         return close(error=f"scenes rendered but would not join: {joined.error}")
-    return close(ok=True, video=getattr(joined, "output", None))
+    lesson = getattr(joined, "output", None)
+
+    # -- subtitles ----------------------------------------------------------
+    # A silent animation is not an explainer: the narration decided how long
+    # every scene runs and then never reached the viewer. Burning it in is the
+    # cheap half of fixing that -- speech would invert the timing, since a
+    # scene's length would become an output of the synthesiser rather than an
+    # input to the layout.
+    burned = False
+    note = ""
+    if subtitles and lesson is not None:
+        narrated = [(o.scene.narration, o.video) for o in outcomes if o.video]
+        result = stages.subtitle(lesson, narrated)
+        burned = bool(getattr(result, "ok", False))
+        if not burned:
+            # Losing the subtitles is not losing the lesson.
+            note = f"subtitles were not burned in: {getattr(result, 'error', '')}"
+
+    return close(ok=True, video=lesson, subtitled=burned, error=note)
 
 
 def issues_of(state: Run) -> tuple[Issue, ...]:

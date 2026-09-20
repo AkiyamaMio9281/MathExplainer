@@ -21,7 +21,7 @@
     v
   Per-scene MP4s
     |
-    |  ffmpeg concat
+    |  ffmpeg concat, then the narration burned in as subtitles
     v
   lesson.mp4
 ```
@@ -88,6 +88,7 @@ state = {
 | `simplify_ir` | `(scene, reason) -> scene` | escalation target |
 | `render` | `code -> Path` | `explainer/validate.py::render` |
 | `concat` | `[Path] -> Path` | ffmpeg |
+| `subtitle` | `(Path, [(narration, clip)]) -> Path` | ffmpeg; timed by each clip's measured length |
 
 ### The escalation ladder
 

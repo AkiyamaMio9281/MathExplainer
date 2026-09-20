@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="simplifications per scene (default: 2)",
     )
     parser.add_argument(
+        "--no-subtitles",
+        action="store_true",
+        help="leave the lesson silent instead of burning the narration in",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="print the run record to stdout as well as writing it",
@@ -93,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         workdir,
         budget=agent.Budget(dollars=args.budget),
         quality=args.quality,
+        subtitles=not args.no_subtitles,
         repair_rounds=(
             repair.REPAIR_ROUNDS if args.repair_rounds is None else args.repair_rounds
         ),
