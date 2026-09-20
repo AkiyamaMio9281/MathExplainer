@@ -128,6 +128,10 @@ def run(
     """
     if not cwd.is_dir():
         raise FileNotFoundError(f"sandbox working directory does not exist: {cwd}")
+    # Absolute, so the child's working directory is never ambiguous. Any path
+    # in *args* has to be absolute too, or relative to this cwd rather than to
+    # the caller's -- a distinction that has cost two debugging sessions.
+    cwd = cwd.resolve()
     started = time.perf_counter()
     try:
         proc = subprocess.run(

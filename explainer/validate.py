@@ -126,8 +126,13 @@ def check_import(workdir: Path, scene_name: str, timeout: float = 120.0) -> Chec
     workdir.mkdir(parents=True, exist_ok=True)
     driver = workdir / "_import_check.py"
     driver.write_text(_IMPORT_DRIVER, encoding="utf-8")
+    # By name, not by path. The child's cwd *is* workdir, so a relative path
+    # built from this process's cwd gets resolved a second time against it --
+    # runs/x/scene/runs/x/scene/_import_check.py, and an error about a file
+    # nobody named. Absolute workdirs hide it, which is why every test that
+    # used pytest's tmp_path passed while the CLI did not.
     done = run_python(
-        [str(driver), SCENE_FILE, scene_name], cwd=workdir, timeout=timeout
+        [driver.name, SCENE_FILE, scene_name], cwd=workdir, timeout=timeout
     )
     if done.ok:
         return Check(Level.IMPORT, True, seconds=done.seconds, scene_name=scene_name)

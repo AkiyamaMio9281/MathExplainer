@@ -22,14 +22,35 @@ Prompt -> Lesson Plan -> Scene IR -> Manim Code -> Render -> MP4
 
 ## Status
 
-Early. The execution substrate is built and verified; the generation stages are
-not written yet.
+It runs. A prompt goes in and a lesson comes out.
+
+```bash
+python cli.py "explain why the angles of a triangle add to 180 degrees"
+```
+
+Measured on that prompt, 2026-09-20: five scenes, all five rendered, no
+repairs and no simplifications, 328 s and $0.70 for 226 s of video. One run is
+not a success rate -- the ablations that turn these into an argument are still
+to come -- but every stage is built and every one has tests.
 
 | Component | State |
 |---|---|
-| `explainer/sandbox.py` -- isolated subprocess execution | done, verified |
-| `explainer/validate.py` -- tiered code validation | done, verified |
-| Lesson Plan / Scene IR / codegen / agent loop | not started |
+| `sandbox.py` -- isolated subprocess execution | done |
+| `validate.py` -- tiered code validation | done |
+| `ir.py` / `ir_rules.py` -- Scene IR, parser, 12 rules | done |
+| `llm.py` -- Anthropic client, caching, cost accounting | done |
+| `plan.py` -- prompt to lesson plan | done |
+| `layout.py` -- lesson plan to Scene IR | done |
+| `codegen.py` -- IR scene to Manim source | done |
+| `repair.py` -- repair, simplification, escalation ladder | done |
+| `video.py` -- ffmpeg concatenation | done |
+| `agent.py` -- state, dispatch, dollar budget | done |
+| `metrics.py` -- attempt log and run summary | done |
+| `cli.py` -- prompt in, mp4 out | done |
+| Ablations, render profiling, a web player | not started |
+
+`spine.py` runs a hand-written IR document through the same renderer with no
+agent and no repair loop, which makes it the baseline the ablations need.
 
 **Start here if you are picking this up:** [`docs/HANDOFF.md`](docs/HANDOFF.md).
 It carries the verified environment facts, the measurements the design depends

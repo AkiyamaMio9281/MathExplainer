@@ -255,3 +255,16 @@ def test_rendering_ignores_a_video_left_by_an_earlier_run(tmp_path):
     assert result.ok, result.error
     assert not stale.exists(), "the earlier render was left in place"
     assert result.output.read_bytes()[:5] != b"stale"
+
+
+@pytest.mark.slow
+def test_a_relative_working_directory_works_too(tmp_path, monkeypatch):
+    # Every other test here uses pytest's tmp_path, which is absolute. The CLI
+    # builds runs/<slug>, which is not, and a relative path handed to a child
+    # whose cwd is that same directory gets resolved against it twice.
+    monkeypatch.chdir(tmp_path)
+    relative = Path("runs") / "lesson" / "scene"
+
+    result = validate(relative, VALID, up_to=Level.DRYRUN)
+
+    assert result.ok, result.error

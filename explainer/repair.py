@@ -367,6 +367,7 @@ DROPPED = "dropped"
 
 CODEGEN = "codegen"
 REPAIRED = "repair"
+STOPPED = "stopped"
 SIMPLIFIED = "simplify"
 RENDER = "render"
 
@@ -464,6 +465,7 @@ def climb(
     quality: str = "l",
     repair_rounds: int = REPAIR_ROUNDS,
     simplify_rounds: int = SIMPLIFY_ROUNDS,
+    stop: Callable[[], str] | None = None,
     tools: Tools | None = None,
 ) -> Outcome:
     """Take one scene as far up the ladder as it needs, and no further.
@@ -478,6 +480,12 @@ def climb(
     the log the metrics are computed from, and it is kept whether the scene
     rendered or not -- a scene that took three repairs is as interesting as one
     that was dropped.
+
+    *stop* is checked before every model call and aborts the scene when it
+    returns a reason. Bounds alone are not a cap: twelve calls a scene is a
+    known number only if the caller knows how many scenes there are, and the
+    ladder does not. Without this, a budget checked between scenes can be
+    overshot by a whole scene; with it, by at most one call.
     """
     tools = tools or default_tools()
     started = time.perf_counter()
@@ -508,6 +516,9 @@ def climb(
 
         for round_number in range(repair_rounds + 1):
             kind = CODEGEN if round_number == 0 else REPAIRED
+            if stop and (reason := stop()):
+                attempts.append(Attempt(STOPPED, stage, round_number, False, error=reason))
+                return finish(DROPPED, error=reason, code=code)
             call_started = time.perf_counter()
             try:
                 if round_number == 0:

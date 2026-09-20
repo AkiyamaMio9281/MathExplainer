@@ -26,6 +26,13 @@ letting ffmpeg look for audio that is not there.
 
 Subprocesses go through ``sandbox.run``, so ffmpeg gets the same allowlisted
 environment as generated Python. It has no business reading an API key either.
+
+**Every path handed to a child is absolute.** The children here run with a
+``cwd`` that is not this process's, so a relative path is resolved a second
+time against it -- ``runs/x/scene/runs/x/scene/clip.mp4``, and an error about
+a file nobody named. It cost a full pipeline run to find the first instance of
+this and a second one to find the next, so the rule is stated rather than
+remembered.
 """
 
 from __future__ import annotations
@@ -80,7 +87,7 @@ def probe(clip: Path, timeout: float = 60.0) -> Stream | None:
             "stream=width,height,r_frame_rate,codec_name,pix_fmt",
             "-of",
             "json",
-            str(clip),
+            str(clip.resolve()),
         ],
         cwd=clip.parent,
         timeout=timeout,
@@ -117,7 +124,7 @@ def duration(clip: Path, timeout: float = 60.0) -> float | None:
             "format=duration",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
-            str(clip),
+            str(clip.resolve()),
         ],
         cwd=clip.parent,
         timeout=timeout,
@@ -145,6 +152,8 @@ def concat(
         )
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    output = output.resolve()
+    clips = [clip.resolve() for clip in clips]
     streams = [probe(clip) for clip in clips]
     unreadable = [str(c) for c, s in zip(clips, streams) if s is None]
     if unreadable:
@@ -200,7 +209,7 @@ def _reencode(
 ) -> Concatenated:
     args = [FFMPEG, "-y"]
     for clip in clips:
-        args += ["-i", str(clip)]
+        args += ["-i", str(clip.resolve())]
 
     # Each input is scaled and resampled to the first clip's geometry before
     # the concat filter sees it; setsar keeps a rescaled clip from carrying a

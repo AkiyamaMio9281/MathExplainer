@@ -41,9 +41,13 @@ MODEL = "claude-opus-5"
 MAX_TOKENS = 16_000
 EFFORT = "high"
 
-# Long enough for adaptive thinking on a hard scene. Raising max_tokens much
-# past this needs streaming instead, or the request will hit an HTTP timeout.
+# Long enough for adaptive thinking on a hard scene.
 TIMEOUT_SECONDS = 600.0
+
+#: Above this, the request is streamed. A non-streaming call with a large
+#: max_tokens hits the HTTP timeout before the model finishes; streaming and
+#: taking the final message avoids it and is what the SDK asks for.
+STREAM_ABOVE = 16_000
 
 
 @dataclass(frozen=True)
@@ -300,10 +304,17 @@ class Client:
         system: str = "",
         schema: Mapping[str, Any] | None = None,
         effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> Reply:
-        """One call. Raises an LLMError subclass rather than returning junk."""
+        """One call. Raises an LLMError subclass rather than returning junk.
+
+        Thinking is billed as output, so a task that reasons hard can exhaust
+        max_tokens before it has written anything -- which is what a layout of
+        five scenes did at the default. Raising the ceiling means streaming.
+        """
         import anthropic
 
+        tokens = max_tokens or self.max_tokens
         request = build_request(
             prompt,
             model=self.model,
@@ -311,11 +322,15 @@ class Client:
             system=system,
             schema=schema,
             effort=effort or self.effort,
-            max_tokens=self.max_tokens,
+            max_tokens=tokens,
         )
         started = time.perf_counter()
         try:
-            message = self.api.messages.create(**request)
+            if tokens > STREAM_ABOVE:
+                with self.api.messages.stream(**request) as stream:
+                    message = stream.get_final_message()
+            else:
+                message = self.api.messages.create(**request)
         except anthropic.BadRequestError as exc:
             raise BadRequest(str(exc)) from exc
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:

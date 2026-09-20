@@ -59,6 +59,12 @@ GENERATED_TYPES = ("text", "mathtex", "polygon", "circle", "line", "arrow")
 #: IR's own pacing rule, so this stage aims at what the next one checks.
 PACING_TOLERANCE = ir_rules.PACING_TOLERANCE
 
+#: A whole document at once, and thinking is billed as output: a five-scene
+#: layout exhausted the client's default before it had written anything.
+#: Above llm.STREAM_ABOVE this streams, which is what makes the larger ceiling
+#: safe rather than a timeout.
+MAX_TOKENS = 32_000
+
 
 def schema() -> dict[str, Any]:
     """The document schema this stage generates against.
@@ -247,6 +253,29 @@ def report(issues: Iterable[Issue]) -> str:
     return "\n".join(str(i) for i in issues)
 
 
+def retry(
+    client: llm.Client,
+    lesson: planning.LessonPlan,
+    document: ir.Document,
+    issues: Iterable[Issue],
+    *,
+    effort: str | None = None,
+) -> tuple[ir.Document | None, tuple[Issue, ...], llm.Reply]:
+    """Ask for the same layout again, with what was wrong with it.
+
+    The same preamble and the same schema, so the cached prefix survives and
+    the correction costs a fraction of the first attempt.
+    """
+    reply = client.complete(
+        retry_prompt(document, issues),
+        preamble=PREAMBLE,
+        schema=schema(),
+        effort=effort,
+        max_tokens=MAX_TOKENS,
+    )
+    return _read(reply, lesson)
+
+
 def make(
     client: llm.Client,
     lesson: planning.LessonPlan,
@@ -255,9 +284,18 @@ def make(
 ) -> tuple[ir.Document | None, tuple[Issue, ...], llm.Reply]:
     """Lay out *lesson*. Returns the document, its issues, and the cost."""
     reply = client.complete(
-        plan_prompt(lesson), preamble=PREAMBLE, schema=schema(), effort=effort
+        plan_prompt(lesson),
+        preamble=PREAMBLE,
+        schema=schema(),
+        effort=effort,
+        max_tokens=MAX_TOKENS,
     )
+    return _read(reply, lesson)
 
+
+def _read(
+    reply: llm.Reply, lesson: planning.LessonPlan
+) -> tuple[ir.Document | None, tuple[Issue, ...], llm.Reply]:
     parsed = ir.parse_json(reply.text)
     if parsed.document is None:
         return None, parsed.issues, reply

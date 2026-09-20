@@ -90,6 +90,16 @@ Omit it from the allowlist and the sandbox fails with
 install rather than a missing environment variable. It is in the allowlist now,
 with a comment; do not "tidy it away".
 
+**A relative path handed to a child with a different cwd is resolved twice.**
+This cost two separate debugging sessions, in two modules, and neither was
+caught by any test. `check_import` passed the driver's path and ffprobe was
+passed the clip's, both while `cwd` was the directory those files were in, so
+the child looked for `runs/x/scene/runs/x/scene/_import_check.py` and reported
+a file nobody had named. Every test used pytest's `tmp_path`, which is
+absolute, so nothing failed until the CLI built `runs/<slug>`. Both modules
+now resolve paths before handing them over, `sandbox.run` resolves its own
+cwd, and both have a regression test that runs from a relative directory.
+
 **Structured outputs compile the schema into a grammar, and it has a ceiling.**
 Four separate 400s, each with its own message, found while building the layout
 stage:
@@ -122,19 +132,26 @@ Set it yourself when running ad-hoc scripts that print anything but ASCII.
 explainer/
   sandbox.py     isolated subprocess execution   done, verified
   validate.py    tiered code validation          done, verified
-  ir.py          Scene IR dataclasses + parser   done, tested
-  ir_rules.py    11 validation rules             done, tested
+  ir.py          Scene IR, parser, schema        done, tested
+  ir_rules.py    12 validation rules             done, tested
   llm.py         Anthropic client + costing      done, verified live
+  plan.py        prompt -> LessonPlan            done, verified live
+  layout.py      LessonPlan -> SceneIR           done, verified live
   codegen.py     IR scene -> Manim source        done, verified live
+  repair.py      simplify_ir + escalation ladder done, tested
   video.py       ffmpeg concat                   done, tested
+  agent.py       state, dispatch, dollar budget  done, verified live
+  metrics.py     attempt log + run summary       done, tested
   spine.py       document -> mp4, no agent       done, verified live
+cli.py           prompt -> mp4                   done, verified live
 ```
 
-**The spine runs.** `python -m explainer.spine docs/examples/pythagoras.json
-runs/spine` takes a hand-written IR document to a finished lesson.mp4. What is
-still missing is everything that makes it an agent: no planner, no IR
-generator, no repair, no escalation ladder, no budget, no metrics, no CLI that
-takes a prompt. Those are commits 21-27 in `ROADMAP.md`.
+**The pipeline runs end to end.** `python cli.py "..."` takes a prompt to a
+lesson.mp4. What is left is not plumbing: the ablations that make the metrics
+mean something, render profiling, and the web coverage. See `ROADMAP.md`.
+
+`spine.py` stays free of the repair loop on purpose -- it is the no-repair
+baseline the ablation needs, already written and already tested.
 
 ### `sandbox.py`
 
@@ -217,6 +234,29 @@ Two consequences:
 
 **Cold start is 9.2 s.** The first-ever manim invocation builds LaTeX and font
 caches. Warm runs are the numbers above. Do not benchmark the first run.
+
+### Prompt to MP4 (measured 2026-09-20)
+
+`python cli.py "explain why the angles of a triangle add to 180 degrees"`:
+
+```
+5/5 scenes in 328s for $0.7019 over 7 calls
+code passed L2 first    100%
+escalated to simplify   0%
+repair rounds           0: 5
+time                    328s total, 39s rendering
+cost                    $0.7019, $0.1404 a rendered scene
+```
+
+226 seconds of video. Seven model calls: one plan, one layout, five codegen --
+the repair loop was never needed, which is the best possible result and also
+the least informative one. The ablations are what turn a run like this into a
+number worth quoting.
+
+Note where the time goes: 39 s of the 328 is rendering. The rest is the model
+thinking, so the persistent-worker optimisation aimed at manim's start-up cost
+would move about a tenth of the wall clock. Worth knowing before optimising the
+wrong end.
 
 ### End to end (measured 2026-09-09)
 

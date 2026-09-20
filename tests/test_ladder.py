@@ -362,3 +362,28 @@ def test_the_log_carries_the_tier_that_rejected_each_attempt():
     outcome = climb(Fake(failures=1))
 
     assert outcome.attempts[0].level == "DRYRUN"
+
+
+def test_a_stop_predicate_aborts_the_scene_between_calls():
+    # Bounds alone are not a cap: twelve calls a scene is a known number only
+    # if the caller knows how many scenes there are, and the ladder does not.
+    budget = {"left": 2}
+
+    def stop():
+        if budget["left"] <= 0:
+            return "budget: nothing left"
+        budget["left"] -= 1
+        return ""
+
+    fake = Fake(never_passes=True)
+    outcome = climb(fake, stop=stop)
+
+    assert outcome.status == repair.DROPPED
+    assert outcome.calls == 2  # not the twelve the bounds would have allowed
+    assert kinds(outcome) == ["codegen", "repair", "stopped"]
+    assert "budget" in outcome.error
+
+
+def test_no_stop_predicate_means_the_bounds_are_the_only_limit():
+    outcome = climb(Fake(never_passes=True), stop=None)
+    assert outcome.calls == 12

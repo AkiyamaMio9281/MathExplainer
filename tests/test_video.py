@@ -36,7 +36,9 @@ def make_clip(path: Path, seconds=1.0, size="320x240", rate=15) -> Path:
             f"testsrc=duration={seconds}:size={size}:rate={rate}",
             "-pix_fmt",
             "yuv420p",
-            str(path),
+            # Absolute, for the same reason the module is: this helper made
+            # the identical mistake first time round.
+            str(path.resolve()),
         ],
         cwd=path.parent,
         timeout=120,
@@ -206,3 +208,20 @@ def test_a_clip_with_no_video_stream_is_reported_before_encoding(tmp_path):
     assert "no readable video stream" in result.error
     assert result.method == ""
     assert not (tmp_path / "lesson.mp4").exists()
+
+
+@pytest.mark.slow
+def test_relative_clip_paths_work(tmp_path, monkeypatch):
+    # The children run with a cwd that is not this process's, so a relative
+    # path gets resolved against it a second time. Every test above uses
+    # pytest's absolute tmp_path; the pipeline builds runs/<slug>, which found
+    # this the hard way.
+    monkeypatch.chdir(tmp_path)
+    room = Path("runs") / "lesson"
+    clips = [make_clip(room / "a.mp4"), make_clip(room / "b.mp4")]
+
+    result = video.concat(clips, room / "lesson.mp4")
+
+    assert result.ok, result.error
+    assert video.probe(Path("runs/lesson/lesson.mp4")) is not None
+    assert video.duration(clips[0]) == pytest.approx(1.0, abs=0.3)
