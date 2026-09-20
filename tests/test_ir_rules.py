@@ -579,7 +579,19 @@ def test_axes_and_plots_are_left_out_of_the_overlap_check():
     # drawn over it. Counting it would fire on nearly every plotted scene.
     document = doc(
         timed_scene(
-            [axes("ax"), plot("p", "ax"), text("t", (0.0, 0.0), "label")],
+            [
+                # Shifted up: an axes is six units tall and the usable band is
+                # six and a fifth, so one centred on the origin reaches into
+                # the subtitles. See the test below.
+                ir.Axes(
+                    id="ax",
+                    x_range=(-1.0, 1.0, 1.0),
+                    y_range=(-1.0, 1.0, 1.0),
+                    position=(0.0, 0.8),
+                ),
+                plot("p", "ax"),
+                text("t", (0.0, 0.0), "label"),
+            ],
             [
                 step("create", "ax", duration=2.0),
                 step("create", "p", duration=2.0),
@@ -711,3 +723,42 @@ def test_overlapping_text_is_still_caught():
         )
     )
     assert names(ir_rules.check_document(document)) == {"no-overlap"}
+
+
+def test_the_bottom_margin_is_the_subtitle_band_rather_than_the_frame_edge():
+    # Measured on an 854x480 render: a two-line cue occupies y -3.25 to -2.52,
+    # so anything below -2.4 is covered by the words it was timed against.
+    low, high = ir_rules.SUBTITLE_BAND
+    assert high < -ir_rules.MARGIN_BOTTOM < 0
+    assert low > -4.0
+
+
+def test_an_axes_centred_on_the_origin_now_reaches_into_the_subtitles():
+    # Six units tall against a usable six and a fifth. This is a true warning,
+    # not a regression: the bottom of that axes is where the narration goes.
+    document = doc(
+        timed_scene([axes("ax")], [step("create", "ax", duration=6.0)])
+    )
+    assert names(ir_rules.check_document(document)) == {"in-frame"}
+
+
+def test_a_title_that_used_to_be_warned_about_is_left_alone():
+    # A real run warned five times about titles reaching y 3.68 against a
+    # frame edge of 4.0, and not one of them was clipped in the video.
+    title = ir.Text(id="title", content="Every number breaks into primes",
+                    position=(0.0, 3.4), font_size=42)
+    box = ir_rules.bounding_box(title)
+
+    assert box.max_y > 3.6  # what the old margin rejected
+    assert box.fits(ir_rules.MARGIN_X, ir_rules.MARGIN_TOP, ir_rules.MARGIN_BOTTOM)
+
+
+def test_the_message_names_the_edge_that_was_crossed():
+    # "outside the margin" is not actionable; "into the subtitle band" is.
+    low = doc(timed_scene([text("t", (0.0, -3.0))], [step("write", "t", duration=6.0)]))
+    high = doc(timed_scene([text("t", (0.0, 3.9))], [step("write", "t", duration=6.0)]))
+    wide = doc(timed_scene([text("t", (6.9, 0.0))], [step("write", "t", duration=6.0)]))
+
+    assert "subtitle band" in ir_rules.check_document(low)[0].message
+    assert "top margin" in ir_rules.check_document(high)[0].message
+    assert "side margin" in ir_rules.check_document(wide)[0].message

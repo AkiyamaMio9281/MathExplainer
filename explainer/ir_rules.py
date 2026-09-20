@@ -49,6 +49,12 @@ descenders. The values below sit just above the measured means, because an
 estimate that is slightly too large turns a near-miss into a warning, while one
 that is too large by a factor of two turns every scene into one.
 
+The margins are asymmetric, and the bottom one is not about spill. The
+finished lesson carries burned-in subtitles, measured at y -3.25 to -2.52, so
+anything the layout puts there is covered by the very words it was timed
+against. The top margin went the other way: at 3.6 it warned about titles
+reaching 3.68 against a frame edge of 4.0, none of which were clipped.
+
 Axes are the other correction. SCENE_IR.md derived their size from `x_range`
 and `y_range`; Manim does not -- it sizes axes from the frame and uses the
 range for tick labels, so an axes is 12 by 6 whatever range it carries. That
@@ -94,10 +100,26 @@ RULE_NAMES = ERROR_RULES | WARNING_RULES
 FRAME_WIDTH = 14.222
 FRAME_HEIGHT = 8.0
 
-#: The margin in-frame enforces. Tighter than the frame because an object
-#: whose estimated box just fits usually spills in the render.
+#: The margins in-frame enforces, and they are not symmetric.
+#:
+#: Horizontally and at the top, the margin exists because an estimated box
+#: that just fits tends to spill in the render. The top was 3.6 and that was
+#: too tight: on a real run it warned five times about titles reaching 3.68
+#: against a frame edge of 4.0, none of which were clipped in the video. 3.8
+#: keeps a fifth of a unit of slack and stops crying wolf.
+#:
+#: The bottom is a different quantity entirely. Subtitles are burned into the
+#: finished lesson, and measured on an 854x480 render a two-line cue occupies
+#: y -3.25 to -2.52. Anything the layout puts down there is covered by the
+#: words it was timed against. The band is reserved whether or not this
+#: particular run burns subtitles: they are the default, and a layout that is
+#: only correct with them switched off is a layout that breaks by default.
 MARGIN_X = 6.6
-MARGIN_Y = 3.6
+MARGIN_TOP = 3.8
+MARGIN_BOTTOM = 2.4
+
+#: Where the burned-in subtitles sit, measured rather than assumed.
+SUBTITLE_BAND = (-3.25, -2.52)
 
 # Text extents, measured against ManimCE 0.21.0 and expressed per font_size/36.
 # See the module docstring for why these are not the numbers SCENE_IR.md first
@@ -408,13 +430,26 @@ class Box:
             and other.min_y < self.max_y
         )
 
-    def within(self, half_width: float, half_height: float) -> bool:
+    def fits(self, side: float, top: float, bottom: float) -> bool:
+        """Whether the box is inside the usable frame.
+
+        Three numbers rather than two: the bottom is reserved for subtitles,
+        so the frame an object may occupy is not centred on the origin.
+        """
         return (
-            -half_width <= self.min_x
-            and self.max_x <= half_width
-            and -half_height <= self.min_y
-            and self.max_y <= half_height
+            -side <= self.min_x
+            and self.max_x <= side
+            and -bottom <= self.min_y
+            and self.max_y <= top
         )
+
+    def outside(self, side: float, top: float, bottom: float) -> str:
+        """Which edge it crossed, for a message worth acting on."""
+        if self.min_x < -side or self.max_x > side:
+            return f"past the side margin of {side}"
+        if self.max_y > top:
+            return f"above the top margin of {top}"
+        return f"into the subtitle band below y {-bottom}"
 
 
 def bounding_box(
@@ -475,13 +510,13 @@ def in_frame(scene: ir.Scene, where: str) -> Iterable[Issue]:
 
     for index, obj in enumerate(scene.objects):
         box = boxes.get(obj.id)
-        if box is not None and not box.within(MARGIN_X, MARGIN_Y):
+        if box is not None and not box.fits(MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM):
             reported.add(obj.id)
             yield Issue(
                 "in-frame",
                 f"{obj.id!r} extends to x {box.min_x:.2f}..{box.max_x:.2f}, "
-                f"y {box.min_y:.2f}..{box.max_y:.2f}, outside the "
-                f"{MARGIN_X} by {MARGIN_Y} margin",
+                f"y {box.min_y:.2f}..{box.max_y:.2f}, "
+                + box.outside(MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM),
                 f"{where}.objects[{index}]",
                 Severity.WARNING,
             )
@@ -494,12 +529,12 @@ def in_frame(scene: ir.Scene, where: str) -> Iterable[Issue]:
         if box is None or step.target in reported:
             continue
         moved = box.moved_to(step.to)
-        if not moved.within(MARGIN_X, MARGIN_Y):
+        if not moved.fits(MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM):
             reported.add(step.target)
             yield Issue(
                 "in-frame",
-                f"moving {step.target!r} to {step.to} puts it outside the "
-                f"{MARGIN_X} by {MARGIN_Y} margin",
+                f"moving {step.target!r} to {step.to} puts it "
+                + moved.outside(MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM),
                 f"{where}.steps[{index}]",
                 Severity.WARNING,
             )

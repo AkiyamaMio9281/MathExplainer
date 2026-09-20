@@ -172,8 +172,23 @@ def test_the_prompt_works_out_each_scenes_timing_budget():
 
 def test_the_preamble_states_the_frame_margin_and_the_pacing_tolerance():
     assert "-6.6 to 6.6" in layout.PREAMBLE
-    assert "-3.6 to 3.6" in layout.PREAMBLE
+    assert "-2.4 to 3.8" in layout.PREAMBLE
     assert "30%" in layout.PREAMBLE
+
+
+def test_the_preamble_tells_the_model_the_bottom_band_is_taken():
+    # Subtitles are burned in below y = -2.5. A layout that does not know that
+    # puts a caption where the words describing it will be.
+    assert "bottom of the frame is not yours" in layout.PREAMBLE
+    assert "-2.5" in layout.PREAMBLE
+
+
+def test_the_preamble_quotes_the_margins_the_rules_actually_enforce():
+    # Aiming at one number and being judged against another is how a stage
+    # produces layouts that are rejected for following its own instructions.
+    assert str(ir_rules.MARGIN_X) in layout.PREAMBLE
+    assert str(ir_rules.MARGIN_TOP) in layout.PREAMBLE
+    assert str(ir_rules.MARGIN_BOTTOM) in layout.PREAMBLE
 
 
 def test_the_preamble_offers_the_extent_estimates_the_rules_will_judge_by():

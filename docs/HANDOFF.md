@@ -235,6 +235,28 @@ Two consequences:
 **Cold start is 9.2 s.** The first-ever manim invocation builds LaTeX and font
 caches. Warm runs are the numbers above. Do not benchmark the first run.
 
+### The layout retry, firing for the first time (2026-09-20)
+
+Same prompt, after the subtitle band was reserved:
+
+```
+6/6 scenes in 508s for $1.1107 over 9 calls
+IR clean first try      no  (2 layout attempts)
+code passed L2 first    100%
+rules fired             none
+```
+
+Nine calls rather than seven: the first layout came back with errors, the
+retry carried the issues back, and the second was clean. That is the first
+time any repair loop in this project has fired on a real run and worked, and
+the run it produced has **zero** layout warnings against five on the previous
+attempt at the same prompt.
+
+One gap it exposed: only the *final* attempt's issues are recorded, so what
+the first layout got wrong is lost. The metric ARCHITECTURE.md asks for --
+which rule caught which defect -- needs the issues from every attempt, not the
+last.
+
 ### Prompt to MP4 (measured 2026-09-20)
 
 `python cli.py "explain why the angles of a triangle add to 180 degrees"`:
@@ -306,6 +328,11 @@ frame_width = 14.222   ->  x in [-7.111, 7.111]
 frame_height = 8.000   ->  y in [-4.000, 4.000]
 ```
 
+The *usable* frame is smaller and not centred. Burned-in subtitles occupy
+`y -3.25 .. -2.52`, measured on an 854x480 render with a two-line cue, so the
+`in-frame` rule allows `y` from -2.4 to 3.8. The top was 3.6 until a real run
+warned five times about titles reaching 3.68 that were not clipped at all.
+
 ---
 
 ## 6. What to build next, in order
@@ -371,13 +398,18 @@ a key.
   timing relationship: `duration` becomes an output of the synthesiser
   rather than an input to the layout, and `pacing` becomes an error rather
   than a warning.
-- **Nothing acts on a layout warning.** `in-frame` and `no-overlap` fire on
-  real runs -- five and three times in two of them -- and are recorded and
-  then ignored. SCENE_IR.md says they may drive `simplify_ir`; the ladder
-  only simplifies when code fails to compile, never when a scene compiles
-  into something that looks wrong. That is the gap between a lesson that
-  renders and a lesson worth watching, and the ablations should measure it
-  before anything is built to close it.
+- **Nothing acts on a layout warning.** `in-frame` and `no-overlap` are
+  recorded and then ignored. SCENE_IR.md says they may drive `simplify_ir`;
+  the ladder only simplifies when code fails to compile, never when a scene
+  compiles into something that looks wrong. That is the gap between a lesson
+  that renders and a lesson worth watching, and the ablations should measure
+  it before anything is built to close it.
+- **Read frames from a still moment.** Sampling a rendered lesson on a fixed
+  interval catches `Write` animations half drawn, and at thumbnail scale a
+  half-drawn line looks exactly like two lines on top of each other. A whole
+  round of "the layout is overlapping" turned out to be that; the settled
+  frames were clean and the estimator was within 12% of manim. Grab a frame
+  during a `wait`, at full resolution, before believing a layout is broken.
 - **Parallel scene rendering** is possible by construction (independent
   workdirs) but not implemented. Worth doing once render time is the
   bottleneck, and it makes a good profiling result.

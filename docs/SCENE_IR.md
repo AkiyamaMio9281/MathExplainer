@@ -20,9 +20,18 @@ x = -7.111 -+- x = +7.111        frame_width  = 14.222
 Origin is the centre of the frame. `[0, 0]` is the middle, `[0, 3]` is near the
 top, `[-6, 0]` is near the left edge.
 
-Keep a margin: the validator flags anything whose bounding box extends past
-`|x| > 6.6` or `|y| > 3.6`, because text rendered at a position near the edge
-spills past it.
+Keep a margin, and it is **not symmetric**: the validator flags anything whose
+bounding box goes past `|x| > 6.6`, above `y = 3.8`, or below `y = -2.4`.
+
+The sides and the top are about spill -- text rendered near an edge extends
+past the position it was given. The bottom is a different quantity: the
+finished lesson carries burned-in subtitles, measured on an 854x480 render at
+`y -3.25 .. -2.52`, so anything placed down there is covered by the narration
+it was timed against. That band is reserved whether or not a particular run
+burns subtitles, because they are the default and a layout that only works
+with them switched off is a layout that breaks by default.
+
+The usable height is therefore about six units, not eight.
 
 ## Document shape
 
@@ -144,7 +153,7 @@ id clear of Manim's CamelCase classes and its ALLCAPS colour constants.
 
 | Rule | Check | Why |
 |---|---|---|
-| `in-frame` | every position / point within `|x| <= 6.6`, `|y| <= 3.6` | objects placed off the edge are invisible in the output but render without error |
+| `in-frame` | every box within `|x| <= 6.6`, `y <= 3.8`, `y >= -2.4` | objects off the edge are invisible in the output but render without error; the bottom band is where the subtitles go |
 | `no-overlap` | approximate bounding boxes of simultaneously-visible `text`/`mathtex` do not intersect | overlapping text is the single most common way a generated scene looks broken; every other pairing is normal or is the content itself |
 | `unknown-field` | a field the object type or action does not use | usually the model confusing two types; the value is reported and dropped rather than silently carried |
 | `pacing` | `len(narration.split()) / 150 * 60` within 30% of `sum(step durations)` | narration and animation drift apart; 150 wpm is a normal explainer pace |

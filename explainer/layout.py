@@ -95,16 +95,23 @@ You do not write the narration. It is given, and it is already final.
 Manim units. The frame is 14.222 by 8.0, so x runs from -7.111 to 7.111 and y
 from -4.0 to 4.0, with [0, 0] at the centre.
 
-**Keep everything inside x from -6.6 to 6.6 and y from -3.6 to 3.6.** An
-object placed at the edge spills past it and is cut off in the video, which
-renders without any error at all.
+**Keep everything inside x from -6.6 to 6.6, and y from -2.4 to 3.8.** An
+object placed past the sides or the top spills out of the video, which renders
+without any error at all.
+
+**The bottom of the frame is not yours.** Subtitles are burned in below
+y = -2.5, carrying the narration this scene is timed against. Anything you
+place down there is covered by the words describing it. Use the top and the
+middle; a caption belongs at y = -2.0, not y = -3.2.
 
 Estimate what things occupy before placing them. A line of text is about
 0.25 units wide per character and 0.5 tall, both scaled by font_size/36; a
 formula about 0.16 per character and 0.6 tall. Two things whose boxes overlap
 are unreadable, and overlapping text is the single most common way a generated
 scene looks broken. Put a title at the top, a formula in the middle, a caption
-below -- separated in y, not stacked at the same point.
+below -- separated in y, not stacked at the same point. With the bottom band
+reserved, the usable height is about six units, not eight: three or four lines
+of text is the comfortable maximum.
 
 # Objects
 
