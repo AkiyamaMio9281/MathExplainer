@@ -172,10 +172,26 @@ estimate is rough. Per `font_size / 36`, centred on `position`:
 | Type | Width | Height |
 |---|---|---|
 | `text` | `0.25 * len(content)` | `0.50` |
-| `mathtex` | `0.16 * len(content)` | `0.60` |
+| `mathtex` | `0.22 * visible_length(content)` | `0.40`, or `0.95` with a stack |
 | shapes | exact, from their points / centre and radius | |
 | `axes` | `12`, whatever the range | `6` |
 | `plot` | the box of the `axes` it is drawn on | |
+
+**`mathtex` is measured against what it renders, not how long it is.** Markup
+is not width: `\frac{1}{2}` is eleven characters of source and a fifth of a
+unit on screen, and a matrix is as wide as its widest row rather than as long
+as its environment. `visible_length` walks the LaTeX -- a fraction counts as
+its wider half, a function name as its letters, any other command as one
+glyph, a superscript as a fraction of a character -- and the constants are
+fitted to 177 expressions taken from eight real runs. Height is two values
+rather than one, because a stacked expression is about two and a half times a
+flat one.
+
+Counting source characters instead over-estimated width by a median of 1.6x
+and by up to 9.4x, and produced warnings that were almost all false: of 50
+`in-frame` and `no-overlap` warnings across those runs, 42 disappear under the
+measured estimate, including **every one** of the 23 overlaps. The eight that
+remain are text genuinely placed in the subtitle band.
 
 **These constants are measured, against ManimCE 0.21.0.** The first draft of
 this document guessed `0.55` per character and `1.0` tall, which is about

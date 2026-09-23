@@ -669,15 +669,22 @@ def test_the_estimator_tracks_what_manim_actually_produces():
         assert 0.8 <= box.width / real.width <= 1.5, (content, size, box.width, real.width)
         assert 0.9 <= box.height / real.height <= 2.5, (content, size)
 
-    # Char count is a weak proxy for LaTeX -- \frac{d}{dx} is twelve characters
-    # that render narrow -- so mathtex gets looser bounds on purpose.
-    formula = "a^2 + b^2 = c^2"
-    box = ir_rules.bounding_box(
-        ir.MathTex(id="m", content=formula, position=(0.0, 0.0), font_size=48)
-    )
-    real = manim.MathTex(formula, font_size=48)
-    assert 0.5 <= box.width / real.width <= 2.5
-    assert 0.9 <= box.height / real.height <= 3.0
+    # MathTex used to get loose bounds here because char count is a weak proxy
+    # for LaTeX. It is measured against visible_length now, so the bounds are
+    # the same order as the text ones.
+    for formula in (
+        "a^2 + b^2 = c^2",
+        r"\frac{1}{2}",
+        r"\sin\theta",
+        r"A=\begin{bmatrix}3&1\\0&2\end{bmatrix}",
+        r"\frac{d}{dx}\sin x = \cos x",
+    ):
+        box = ir_rules.bounding_box(
+            ir.MathTex(id="m", content=formula, position=(0.0, 0.0), font_size=48)
+        )
+        real = manim.MathTex(formula, font_size=48)
+        assert 0.7 <= box.width / real.width <= 2.0, (formula, box.width, real.width)
+        assert 0.9 <= box.height / real.height <= 2.2, (formula, box.height, real.height)
 
     real_axes = manim.Axes(x_range=[-3, 3, 1], y_range=[-2, 2, 1])
     box = ir_rules.bounding_box(axes("ax"))
@@ -762,3 +769,90 @@ def test_the_message_names_the_edge_that_was_crossed():
     assert "subtitle band" in ir_rules.check_document(low)[0].message
     assert "top margin" in ir_rules.check_document(high)[0].message
     assert "side margin" in ir_rules.check_document(wide)[0].message
+
+
+# ---------------------------------------------------------------------------
+# What LaTeX renders to, as opposed to how long it is
+# ---------------------------------------------------------------------------
+
+
+def test_a_stacked_fraction_is_as_wide_as_its_wider_half():
+    # Eleven characters of source, one glyph wide on screen. This single case
+    # produced nine of the twenty-three false overlap warnings in one batch.
+    assert ir_rules.visible_length(r"\frac{1}{2}") == 1.0
+    assert ir_rules.visible_length(r"\frac{abc}{d}") == 3.0
+
+
+def test_a_matrix_is_as_wide_as_its_widest_row():
+    narrow = ir_rules.visible_length(r"\begin{bmatrix}1\\2\end{bmatrix}")
+    wide = ir_rules.visible_length(r"\begin{bmatrix}1&2&3\\4&5&6\end{bmatrix}")
+
+    assert wide > narrow
+    # Not the thirty-odd characters of source.
+    assert wide < 10
+
+
+def test_a_function_name_is_as_wide_as_its_letters():
+    assert ir_rules.visible_length(r"\sin") == 3.0
+    assert ir_rules.visible_length(r"\log") == 3.0
+
+
+def test_a_symbol_command_is_one_glyph_however_long_its_name():
+    assert ir_rules.visible_length(r"\theta") == 1.0
+    assert ir_rules.visible_length(r"\Rightarrow") == 1.0
+    assert ir_rules.visible_length(r"\times") == 1.0
+
+
+def test_spacing_and_sizing_commands_take_no_width():
+    assert ir_rules.visible_length(r"\left(x\right)") == ir_rules.visible_length("(x)")
+    assert ir_rules.visible_length(r"a\,b") == ir_rules.visible_length("ab")
+
+
+def test_a_superscript_is_a_fraction_of_a_character():
+    plain = ir_rules.visible_length("a")
+    powered = ir_rules.visible_length("a^2")
+
+    assert plain < powered < 2 * plain
+
+
+def test_braces_are_not_glyphs():
+    assert ir_rules.visible_length("{abc}") == ir_rules.visible_length("abc")
+
+
+def test_a_stacked_expression_is_taller_than_a_flat_one():
+    # One height for everything was 2.1x too tall for a plain expression and
+    # too short for the tallest fraction by nearly half.
+    _, flat = ir_rules.mathtex_extent("a + b", 48)
+    _, stacked = ir_rules.mathtex_extent(r"\frac{a}{b}", 48)
+
+    assert stacked > flat * 2
+    assert flat == pytest.approx(ir_rules.MATHTEX_HEIGHT * 48 / 36)
+
+
+def test_malformed_latex_is_measured_rather_than_raising():
+    # The model writes this, so the estimator has to survive it.
+    for broken in (r"\frac{1", r"\begin{bmatrix}1&2", "\\", "^", "{{{"):
+        assert ir_rules.visible_length(broken) >= 0.0
+
+
+@pytest.mark.slow
+def test_the_estimator_tracks_manim_across_real_generated_formulas():
+    # Fitted against 177 expressions the model wrote across eight runs. These
+    # are a spread of them, including the shapes the old estimator got most
+    # wrong.
+    import manim
+
+    for formula in (
+        "2",
+        r"\theta",
+        r"\frac{1}{4}",
+        "a^2 + b^2 = c^2",
+        r"\sin\theta",
+        r"60 = 2 \times 2 \times 3 \times 5",
+        r"A=\begin{bmatrix}3&1\\0&2\end{bmatrix}",
+        r"\left(x+\frac{b}{2a}\right)^2 = \frac{b^2-4ac}{4a^2}",
+    ):
+        width, height = ir_rules.mathtex_extent(formula, 36)
+        real = manim.MathTex(formula, font_size=36)
+        assert 0.5 <= width / real.width <= 2.2, (formula, width, real.width)
+        assert height >= real.height * 0.8, (formula, height, real.height)

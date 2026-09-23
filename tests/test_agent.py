@@ -554,3 +554,18 @@ def test_the_record_carries_every_layout_attempt(tmp_path):
 
     assert [len(a) for a in payload["layout_attempts"]] == [1, 0]
     assert payload["layout_attempts"][0][0]["rule"] == "non-empty"
+
+
+def test_the_record_keeps_the_layout_the_rules_judged(tmp_path):
+    # A warning that cannot be re-examined is a claim. Re-checking the extent
+    # estimator against past runs needed the documents, and they were not
+    # there -- the layouts had to be reconstructed from generated Python.
+    state = run(Stub(), tmp_path)
+    payload = json.loads(
+        metrics.record(state, tmp_path / "run.json").read_text(encoding="utf-8")
+    )
+
+    assert payload["document"]["scenes"][0]["id"] == "one"
+    assert payload["document"]["scenes"][0]["objects"][0]["type"] == "text"
+    # Round-trips, so the rules can be re-run over it exactly as they were.
+    assert ir.parse_document(payload["document"]).ok

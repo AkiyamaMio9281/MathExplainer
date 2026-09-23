@@ -195,6 +195,11 @@ def record(state: agent.Run, path: Path) -> Path:
         "stopped": state.stopped,
         "error": state.error,
         "summary": summarise(state).as_dict(),
+        # The layout the rules judged. Without it a warning can only be
+        # re-examined by reconstructing the scene from the generated Python,
+        # which is what re-checking an estimator against past runs actually
+        # took -- and this module claims a summary should be recomputable.
+        "document": state.document.to_dict() if state.document else None,
         "issues": [
             {"rule": i.rule, "where": i.where, "severity": i.severity.value,
              "message": i.message}

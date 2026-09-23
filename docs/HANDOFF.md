@@ -270,6 +270,31 @@ dominated by waiting on the model, not by local CPU, so throughput scales with
 parallel lessons. That settles the parallel-rendering open question below:
 parallelise at the lesson level, not the scene level.
 
+### The MathTex estimate, measured and replaced (2026-09-23)
+
+177 distinct expressions were harvested from the 41 generated scenes -- what
+the model actually writes, rather than what a test author imagines -- and
+rendered to measure against.
+
+| estimate | median ratio to manim | worst | over 1.5x |
+|---|---|---|---|
+| `0.16 * len(source)` | 1.59 | 9.42 | 97/177 |
+| `0.22 * visible_length` | 0.98 | 2.70 | 3/177 |
+
+Height was wrong in both directions at once: one constant of 0.60 was 2.1x too
+tall for a plain expression (median 0.284, n=134) and too short for the tallest
+fraction by nearly half (median 0.770, max 0.978, n=43). It is two values now,
+chosen just above each group's p90.
+
+Re-judging the warnings eight real runs reported: **42 of 50 disappear,
+including every one of the 23 overlaps**. The eight that remain are text
+genuinely placed in the subtitle band, which is the rule working.
+
+That re-check needed the IR documents and the run records did not have them,
+so the layouts had to be reconstructed from the generated Python. The record
+now keeps the document -- `metrics.py` claims a summary should be recomputable
+and this is what that costs when it is not.
+
 ### The MathTex extent estimate is where the warnings come from
 
 Those 25 scenes produced 45 layout warnings, and **41 of them (91%) name a

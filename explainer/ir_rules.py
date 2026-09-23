@@ -67,6 +67,7 @@ plots anything, and the rule exists to catch overlapping text.
 from __future__ import annotations
 
 import itertools
+import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator, Mapping
 
@@ -126,8 +127,25 @@ SUBTITLE_BAND = (-3.25, -2.52)
 # carried.
 TEXT_WIDTH_PER_CHAR = 0.25  # measured mean 0.233, max 0.257
 TEXT_HEIGHT = 0.50  # measured 0.241 to 0.486, by ascender and descender
-MATHTEX_WIDTH_PER_CHAR = 0.16  # measured mean 0.134, max 0.186
-MATHTEX_HEIGHT = 0.60  # measured 0.169 to 0.772; fractions are tall
+
+# MathTex is measured against `visible_length` rather than the length of the
+# source, and it is not one constant but three, fitted to 177 expressions the
+# model actually wrote across eight runs:
+#
+#   width    0.22 per visible unit   (least squares through the origin: 0.219)
+#   height   0.40 plain              (p90 of 134 measured: 0.374, max 0.491)
+#   height   0.95 with a stack       (p90 of 43 measured: 0.896, max 0.978)
+#
+# The old single pair -- 0.16 per source character and 0.60 tall -- was wrong
+# in both directions at once. It over-estimated width by a median of 1.6x and
+# by up to 9.4x (a stacked half is eleven characters of source and a fifth of
+# a unit on screen), while its one height was 2.1x too tall for a plain
+# expression and too short for the tallest fraction by nearly half. Measured
+# on real output, 55% of expressions were over-estimated by more than half
+# again; with these, 1.7% are.
+MATHTEX_WIDTH_PER_UNIT = 0.22
+MATHTEX_HEIGHT = 0.40
+MATHTEX_STACKED_HEIGHT = 0.95
 
 # Manim sizes axes from the frame, not from x_range/y_range.
 AXES_WIDTH = 12.0
@@ -380,6 +398,120 @@ def timeline(scene: ir.Scene, where: str) -> Iterable[Issue]:
 # ---------------------------------------------------------------------------
 
 
+#: Commands that render as a word rather than a symbol.
+_WORD_COMMANDS = frozenset(
+    {
+        "sin", "cos", "tan", "sec", "csc", "cot", "log", "ln", "exp",
+        "max", "min", "lim", "det", "gcd", "lcm", "deg", "arg",
+    }
+)
+
+#: Commands that occupy no width worth counting.
+_NO_WIDTH = frozenset(
+    {
+        "left", "right", "big", "Big", "bigg", "Bigg",
+        "displaystyle", "textstyle", "quad", "qquad",
+        "!", ",", ";", ":", " ", "\\",
+    }
+)
+
+#: Constructs that stack vertically, which is what makes an expression tall.
+_STACKS = re.compile(r"\\(?:frac|dfrac|tfrac|sqrt|begin\{[a-z]*matrix\})")
+
+_COMMAND = re.compile(r"\\([A-Za-z]+|.)")
+
+
+def _argument(latex: str, start: int) -> tuple[str, int]:
+    """The ``{...}`` group at *start*, or the single token there."""
+    if start >= len(latex):
+        return "", start
+    if latex[start] != "{":
+        return latex[start], start + 1
+    depth = 0
+    for index in range(start, len(latex)):
+        if latex[index] == "{":
+            depth += 1
+        elif latex[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return latex[start + 1 : index], index + 1
+    return latex[start + 1 :], len(latex)
+
+
+def visible_length(latex: str) -> float:
+    """Roughly how many glyph widths *latex* renders to.
+
+    Markup is not width, and counting source characters is what made this
+    module's warnings mostly false. A stacked fraction is as wide as its wider
+    half, a matrix as wide as its widest row, a superscript a fraction of a
+    character -- and the length of the source reflects none of it.
+    """
+    total = 0.0
+    index = 0
+    while index < len(latex):
+        char = latex[index]
+
+        if char == "\\":
+            match = _COMMAND.match(latex, index)
+            if match is None:
+                index += 1
+                continue
+            name = match.group(1)
+            index = match.end()
+
+            if name in ("frac", "dfrac", "tfrac"):
+                numerator, index = _argument(latex, index)
+                denominator, index = _argument(latex, index)
+                total += max(visible_length(numerator), visible_length(denominator))
+            elif name == "sqrt":
+                radicand, index = _argument(latex, index)
+                total += visible_length(radicand) + 1.2
+            elif name == "begin":
+                environment, index = _argument(latex, index)
+                closing = latex.find("\\end{" + environment + "}", index)
+                body = latex[index : closing if closing != -1 else len(latex)]
+                index = (
+                    closing + len("\\end{" + environment + "}")
+                    if closing != -1
+                    else len(latex)
+                )
+                rows = [
+                    sum(visible_length(cell) + 0.6 for cell in row.split("&"))
+                    for row in body.split("\\\\")
+                ]
+                total += (max(rows) if rows else 0.0) + 1.0  # the brackets
+            elif name in _WORD_COMMANDS:
+                total += len(name)
+            elif name in _NO_WIDTH:
+                pass
+            else:
+                total += 1.0
+            continue
+
+        if char in "^_":
+            argument, index = _argument(latex, index + 1)
+            total += 0.6 * visible_length(argument)
+            continue
+        if char in "{}$&":
+            index += 1
+            continue
+        if char == " ":
+            total += 0.35
+            index += 1
+            continue
+
+        total += 1.0
+        index += 1
+    return total
+
+
+def mathtex_extent(content: str, font_size: float) -> tuple[float, float]:
+    """The width and height one MathTex occupies, in Manim units."""
+    scale = font_size / 36.0
+    height = MATHTEX_STACKED_HEIGHT if _STACKS.search(content) else MATHTEX_HEIGHT
+    return MATHTEX_WIDTH_PER_UNIT * visible_length(content) * scale, height * scale
+
+
 @dataclass(frozen=True)
 class Box:
     """An axis-aligned bounding box in Manim units."""
@@ -464,12 +596,7 @@ def bounding_box(
             TEXT_HEIGHT * scale,
         )
     if isinstance(obj, ir.MathTex):
-        scale = obj.font_size / 36.0
-        return Box.around(
-            obj.position,
-            MATHTEX_WIDTH_PER_CHAR * len(obj.content) * scale,
-            MATHTEX_HEIGHT * scale,
-        )
+        return Box.around(obj.position, *mathtex_extent(obj.content, obj.font_size))
     if isinstance(obj, ir.Polygon):
         return Box.containing(obj.points)
     if isinstance(obj, ir.Circle):
