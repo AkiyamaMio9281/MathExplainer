@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from explainer import agent, ir, llm, metrics, plan as planning, repair
+from explainer import agent, ir, llm, metrics, plan as planning, repair, speech
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,10 @@ class Stub:
         fails: set[str] = frozenset(),
         join_ok=True,
         burn_ok=True,
+        mux_ok=True,
+        mute: set[str] = frozenset(),
+        speech_seconds=16.0,
+        clip_seconds=16.0,
     ):
         self.plan_value = plan if plan is not None else lesson()
         self.plan_issues = plan_issues
@@ -96,9 +100,18 @@ class Stub:
         self.fails = set(fails)
         self.join_ok = join_ok
         self.burn_ok = burn_ok
+        self.mux_ok = mux_ok
+        self.mute = set(mute)
+        self.speech_seconds = speech_seconds
+        self.clip_seconds = clip_seconds
         self.subtitled: list[str] = []
         self.calls: list[str] = []
         self.climbed: list[str] = []
+        self.spoke: list[str] = []
+        self.cues: list = []
+        self.placements: list = []
+        self.total = 0.0
+        self.voice = ""
 
     def plan(self, client, prompt, **kwargs):
         self.calls.append("plan")
@@ -132,23 +145,66 @@ class Stub:
             error="it would not compile" if failed else "",
         )
 
+    def speak(self, scenes, directory, **kwargs):
+        self.calls.append("speak")
+        self.spoke = [scene_id for scene_id, _ in scenes]
+        self.voice = kwargs.get("voice")
+        out = {}
+        for scene_id, narration in scenes:
+            if scene_id in self.mute:
+                out[scene_id] = speech.Spoken(False, error="the endpoint refused")
+                continue
+            words = narration.split()
+            seconds = self.speech_seconds
+            step = seconds / max(len(words), 1)
+            out[scene_id] = speech.Spoken(
+                True,
+                path=directory / f"{scene_id}.mp3",
+                seconds=seconds,
+                words=tuple(
+                    speech.Word(i * step, (i + 1) * step, w)
+                    for i, w in enumerate(words)
+                ),
+            )
+        return out
+
     def concat(self, clips, out, **kwargs):
         self.calls.append("concat")
         return Joined(ok=self.join_ok, output=out, error="" if self.join_ok else "mismatch")
 
-    def subtitle(self, video_path, scenes, **kwargs):
+    def measure(self, clip, **kwargs):
+        return self.clip_seconds
+
+    def subtitle(self, video_path, cues, **kwargs):
         self.calls.append("subtitle")
-        self.subtitled = [n for n, _ in scenes]
+        self.cues = list(cues)
+        self.subtitled = [cue.text for cue in cues]
         return Joined(ok=self.burn_ok, output=video_path,
                       error="" if self.burn_ok else "libass said no")
 
+    def sound(self, video_path, placements, total, **kwargs):
+        self.calls.append("sound")
+        self.placements = list(placements)
+        self.total = total
+        return Joined(ok=self.mux_ok, output=video_path,
+                      error="" if self.mux_ok else "no such encoder")
+
     def stages(self) -> agent.Stages:
         return agent.Stages(
-            self.plan, self.layout, self.retry, self.climb, self.concat, self.subtitle
+            self.plan,
+            self.speak,
+            self.layout,
+            self.retry,
+            self.climb,
+            self.concat,
+            self.measure,
+            self.subtitle,
+            self.sound,
         )
 
 
 def run(stub: Stub, tmp_path, **kwargs) -> agent.Run:
+    kwargs.setdefault("audio", False)
     return agent.run("explain something", tmp_path, object(), stages=stub.stages(), **kwargs)
 
 
@@ -499,7 +555,8 @@ def test_the_narration_reaches_the_viewer(tmp_path):
     state = run(stub, tmp_path)
 
     assert state.subtitled
-    assert stub.subtitled == ["word " * 40, "word " * 40]
+    # Both scenes' words, all of them, and none invented.
+    assert " ".join(cue.text for cue in stub.cues).split() == ["word"] * 80
 
 
 def test_only_the_scenes_that_rendered_are_subtitled(tmp_path):
@@ -508,7 +565,10 @@ def test_only_the_scenes_that_rendered_are_subtitled(tmp_path):
     stub = Stub(plan=lesson("a", "b", "c"), doc=document("a", "b", "c"), fails={"b"})
     run(stub, tmp_path)
 
-    assert len(stub.subtitled) == 2
+    # Two clips of sixteen seconds. Captioning the dropped scene as well would
+    # run the last line out to forty-eight.
+    assert len(" ".join(cue.text for cue in stub.cues).split()) == 80
+    assert stub.cues[-1].end == pytest.approx(32.0)
 
 
 def test_losing_the_subtitles_does_not_lose_the_lesson(tmp_path):
@@ -518,7 +578,7 @@ def test_losing_the_subtitles_does_not_lose_the_lesson(tmp_path):
     assert state.video is not None
     assert not state.subtitled
     assert "subtitles were not burned in" in state.error
-    assert "(no subtitles)" in state.summary()
+    assert "no subtitles" in state.summary()
 
 
 def test_subtitles_can_be_turned_off(tmp_path):
@@ -569,3 +629,222 @@ def test_the_record_keeps_the_layout_the_rules_judged(tmp_path):
     assert payload["document"]["scenes"][0]["objects"][0]["type"] == "text"
     # Round-trips, so the rules can be re-run over it exactly as they were.
     assert ir.parse_document(payload["document"]).ok
+
+
+# ---------------------------------------------------------------------------
+# Speech, and the order that makes it line up
+# ---------------------------------------------------------------------------
+
+
+def test_the_narration_is_spoken_before_the_layout_is_asked_for(tmp_path):
+    # The whole reason the audio lines up. Without speech the word count
+    # estimates how long a scene should run; with it the synthesiser decides,
+    # and the layout has to be told before it spends its budget rather than
+    # after. Speaking last would leave the animation and the voice two
+    # independent lengths, reconcilable only by stretching one of them.
+    stub = Stub()
+    run(stub, tmp_path, audio=True)
+
+    assert stub.calls.index("speak") < stub.calls.index("layout")
+    assert stub.calls[:3] == ["plan", "speak", "layout"]
+
+
+def test_the_layout_is_given_the_measured_length_not_the_estimate(tmp_path):
+    captured = []
+    stub = Stub(speech_seconds=31.7)
+    inner = stub.layout
+
+    def watch(client, lesson_, **kwargs):
+        captured.append(lesson_)
+        return inner(client, lesson_, **kwargs)
+
+    stub.layout = watch
+    run(stub, tmp_path, audio=True)
+
+    assert [s.seconds for s in captured[0].scenes] == [31.7, 31.7]
+    assert captured[0].measured
+    # 40 words at the estimated rate is nowhere near 31.7s, so this is the
+    # measurement rather than the guess.
+    assert captured[0].scenes[0].spoken_seconds == 31.7
+
+
+def test_the_narration_is_spoken_once_however_many_times_a_scene_is_repaired(tmp_path):
+    # The words are final once the plan is. Re-synthesising per layout attempt
+    # would re-time every scene against audio the last attempt was fitted to.
+    stub = Stub(layout_issues=(ir.Issue("non-empty", "x", "scenes[0]"),), retry_issues=())
+    run(stub, tmp_path, audio=True)
+
+    assert stub.calls.count("speak") == 1
+    assert stub.calls.count("layout") == 1 and stub.calls.count("retry") == 1
+
+
+def test_speech_can_be_turned_off_and_then_nothing_is_synthesised(tmp_path):
+    stub = Stub()
+    state = run(stub, tmp_path, audio=False)
+
+    assert "speak" not in stub.calls
+    assert "sound" not in stub.calls
+    assert state.ok and not state.voiced
+    assert state.spoken == {}
+
+
+def test_the_voice_is_passed_through(tmp_path):
+    stub = Stub()
+    run(stub, tmp_path, audio=True, voice="en-GB-SoniaNeural")
+
+    assert stub.voice == "en-GB-SoniaNeural"
+
+
+# ---------------------------------------------------------------------------
+# Sound on the finished lesson
+# ---------------------------------------------------------------------------
+
+
+def test_each_scenes_audio_is_placed_where_that_scene_starts(tmp_path):
+    # Measured from the clips, not assumed: what a scene asked for and what
+    # manim produced differ every time, and the gap puts the voice over the
+    # wrong animation.
+    stub = Stub(
+        plan=lesson("a", "b", "c"),
+        doc=document("a", "b", "c"),
+        clip_seconds=12.0,
+        # What `layout.fit_to_speech` is for: the clip and the voice agree.
+        speech_seconds=12.0,
+    )
+    state = run(stub, tmp_path, audio=True)
+
+    assert state.voiced
+    assert [start for _, start in stub.placements] == pytest.approx([0.0, 12.0, 24.0])
+    assert stub.total == pytest.approx(36.0)
+    assert state.drift == pytest.approx(0.0)
+
+
+def test_a_dropped_scene_leaves_no_gap_in_the_narration(tmp_path):
+    # The dropped scene has no clip, so its words are never said over one. If
+    # its audio were placed anyway every later scene would be a scene late.
+    stub = Stub(plan=lesson("a", "b", "c"), doc=document("a", "b", "c"), fails={"b"},
+                clip_seconds=10.0)
+    state = run(stub, tmp_path, audio=True)
+
+    assert [p.name for p, _ in stub.placements] == ["a.mp3", "c.mp3"]
+    assert [start for _, start in stub.placements] == pytest.approx([0.0, 10.0])
+    assert state.voiced
+
+
+def test_the_sound_goes_on_after_the_subtitles_are_burned(tmp_path):
+    # Burning re-encodes the picture; muxing copies it. The other order would
+    # either lose the audio or pay for a second encode of the video.
+    stub = Stub()
+    run(stub, tmp_path, audio=True)
+
+    assert stub.calls.index("subtitle") < stub.calls.index("sound")
+
+
+def test_the_subtitles_are_timed_by_the_synthesiser_when_there_is_one(tmp_path):
+    # Word timings, so a line lands on the syllable rather than on a share of
+    # the scene worked out from how many words it has.
+    stub = Stub(speech_seconds=10.0, clip_seconds=10.0)
+    run(stub, tmp_path, audio=True)
+
+    # Forty words spoken evenly over ten seconds; the first cue is the first
+    # twelve of them, so it ends at 12/40 of the scene.
+    assert stub.cues[0].end == pytest.approx(3.0)
+
+
+def test_losing_the_voice_does_not_lose_the_lesson(tmp_path):
+    stub = Stub(mux_ok=False)
+    state = run(stub, tmp_path, audio=True)
+
+    assert state.ok
+    assert state.video is not None
+    assert state.subtitled
+    assert not state.voiced
+    assert "the narration was not added" in state.error
+    assert "no sound" in state.summary()
+
+
+def test_a_synthesiser_that_will_not_speak_leaves_a_subtitled_silent_lesson(tmp_path):
+    # edge-tts talks to an endpoint Microsoft does not promise to keep. When
+    # it is gone the lesson is the one this pipeline made before it had audio,
+    # which is a working lesson.
+    stub = Stub(mute={"one"})
+    state = run(stub, tmp_path, audio=True)
+
+    assert state.ok
+    assert state.subtitled and not state.voiced
+    assert "sound" not in stub.calls
+    assert "the lesson is silent" in state.error
+    assert "the endpoint refused" in state.error
+
+
+def test_one_scene_failing_to_speak_does_not_half_narrate_the_lesson(tmp_path):
+    # Placing the scenes that did speak would leave the others silent, and a
+    # viewer cannot tell a missing scene from a pause. All or none.
+    stub = Stub(plan=lesson("a", "b", "c"), doc=document("a", "b", "c"), mute={"b"})
+    state = run(stub, tmp_path, audio=True)
+
+    assert not state.voiced
+    assert stub.placements == []
+
+
+def test_a_scene_that_could_not_be_spoken_is_timed_by_word_count_instead(tmp_path):
+    # The estimate is what the pipeline had before it had a synthesiser, and
+    # it still times the subtitles of a lesson that ends up silent.
+    stub = Stub(mute={"one", "two"}, clip_seconds=10.0)
+    run(stub, tmp_path, audio=True)
+
+    assert stub.cues
+    assert stub.cues[-1].end == pytest.approx(20.0)
+
+
+def test_what_was_spoken_is_kept_whether_it_was_used_or_not(tmp_path):
+    stub = Stub(mute={"one"})
+    state = run(stub, tmp_path, audio=True)
+
+    assert set(state.spoken) == {"one", "two"}
+    assert not state.spoken["one"].ok
+    assert state.spoken["two"].ok
+    assert state.spoken_seconds == pytest.approx(16.0)
+
+
+def test_the_gap_between_what_was_said_and_what_was_shown_is_recorded(tmp_path):
+    # The number that says whether the layout took the measured duration
+    # seriously. Positive means the voice outlasted the animation under it.
+    stub = Stub(speech_seconds=18.0, clip_seconds=16.0)
+    state = run(stub, tmp_path, audio=True)
+
+    assert state.drift == pytest.approx(2.0)
+    assert "+2.00s" in state.summary()
+
+
+def test_an_animation_that_outlasts_its_narration_is_a_negative_gap(tmp_path):
+    stub = Stub(speech_seconds=14.0, clip_seconds=20.0)
+    state = run(stub, tmp_path, audio=True)
+
+    assert state.drift == pytest.approx(-6.0)
+
+
+def test_a_voiced_lesson_says_nothing_is_missing(tmp_path):
+    state = run(Stub(), tmp_path, audio=True)
+
+    assert state.voiced and state.subtitled
+    assert "(no " not in state.summary()
+
+
+def test_the_last_word_of_the_lesson_is_never_cut_off(tmp_path):
+    # The track is capped so it cannot run arbitrarily past the picture. If
+    # that cap were the video's length, a scene whose voice overran would lose
+    # its closing syllable -- and the end of a lesson is the worst place to
+    # lose one.
+    stub = Stub(speech_seconds=20.0, clip_seconds=16.0)
+    run(stub, tmp_path, audio=True)
+
+    # Two scenes of sixteen seconds; the second's voice ends at 16 + 20 = 36.
+    assert stub.total == pytest.approx(36.0)
+
+
+def test_a_track_no_longer_than_the_picture_is_not_stretched_to_fit(tmp_path):
+    stub = Stub(speech_seconds=10.0, clip_seconds=16.0)
+    run(stub, tmp_path, audio=True)
+
+    assert stub.total == pytest.approx(32.0)

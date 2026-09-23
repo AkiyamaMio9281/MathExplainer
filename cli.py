@@ -14,7 +14,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from explainer import agent, llm, metrics, video
+from explainer import agent, llm, metrics, speech, video
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,7 +59,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-subtitles",
         action="store_true",
-        help="leave the lesson silent instead of burning the narration in",
+        help="do not burn the narration in as captions",
+    )
+    parser.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="do not speak the narration; the lesson keeps its subtitles",
+    )
+    parser.add_argument(
+        "--voice",
+        default=speech.VOICE,
+        help=f"the voice to narrate with (default: {speech.VOICE})",
     )
     parser.add_argument(
         "--json",
@@ -99,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         budget=agent.Budget(dollars=args.budget),
         quality=args.quality,
         subtitles=not args.no_subtitles,
+        audio=not args.no_audio,
+        voice=args.voice,
         repair_rounds=(
             repair.REPAIR_ROUNDS if args.repair_rounds is None else args.repair_rounds
         ),

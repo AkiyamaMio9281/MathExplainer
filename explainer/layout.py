@@ -151,12 +151,11 @@ Never act on an object before something introduces it. Never act on one after
 
 # Timing
 
-**The narration decides how long a scene runs.** It is read at 150 words a
-minute, so a scene of N words runs N/150*60 seconds, and the step durations
-must add up to about that -- within {PACING_TOLERANCE:.0%}. Each scene's word
-count is given below. Work out the budget first, then spend it across the
-steps: an animation that finishes in a third of the narration leaves the
-viewer watching a still frame, and one that runs twice as long is worse.
+**The narration decides how long a scene runs.** Each scene below states the
+number of seconds its steps must add up to, within {PACING_TOLERANCE:.0%}.
+Work out the budget first, then spend it across the steps: an animation that
+finishes in a third of the narration leaves the viewer watching a still frame,
+and one that runs twice as long is worse.
 
 A `wait` at the end is a legitimate way to spend what is left over.
 
@@ -168,22 +167,33 @@ Return one scene per scene in the plan, in the same order, **with the same
 
 
 def plan_prompt(lesson: planning.LessonPlan) -> str:
-    """The user half: the plan, with each scene's timing budget worked out."""
+    """The user half: the plan, with each scene's timing budget worked out.
+
+    When the narration has already been spoken, the budget is the synthesiser's
+    measured length rather than a word-count estimate -- the audio is fixed by
+    then, so the animation is being fitted to it rather than the other way
+    round. The difference is stated in the prompt because it changes what the
+    number means: an estimate is a target to come close to, a measurement is a
+    length to fill.
+    """
     lines = [
         f"Lay out this lesson: {lesson.title}",
         f"Audience: {lesson.audience}" if lesson.audience else "",
         "",
     ]
     for scene in lesson.scenes:
-        words = len(scene.narration.split())
-        lines += [
-            f"## {scene.id}",
-            f"Teaches: {scene.beat}",
-            f"Narration ({words} words, so the steps must total about "
-            f"{scene.spoken_seconds:.1f}s):",
-            scene.narration,
-            "",
-        ]
+        if scene.measured:
+            budget = (
+                f"Narration (spoken, and it takes exactly "
+                f"{scene.spoken_seconds:.1f}s -- the steps must fill that):"
+            )
+        else:
+            words = len(scene.narration.split())
+            budget = (
+                f"Narration ({words} words, so the steps must total about "
+                f"{scene.spoken_seconds:.1f}s):"
+            )
+        lines += [f"## {scene.id}", f"Teaches: {scene.beat}", budget, scene.narration, ""]
     return "\n".join(line for line in lines if line is not None)
 
 
@@ -243,6 +253,75 @@ def carry_narration(
             Issue("matches-plan", f"the plan's scene {missing!r} was not laid out", "$")
         )
 
+    return replace(document, scenes=tuple(scenes)), tuple(issues)
+
+
+#: How far a scene's steps may be stretched or squeezed to meet the voice.
+#: Past these the mismatch is a layout that misread its budget rather than one
+#: that rounded it, and scaling would produce slow motion or a flicker.
+MIN_FIT = 0.5
+MAX_FIT = 2.0
+
+
+def fit_to_speech(
+    document: ir.Document, lesson: planning.LessonPlan
+) -> tuple[ir.Document, tuple[Issue, ...]]:
+    """Scale each scene's steps to the length its narration actually takes.
+
+    The layout is *told* the measured duration and still undershoots it. Over
+    one real four-scene lesson it asked for 44.5s, 42.5s, 41.5s and 50.5s
+    against narration of 46.9s, 48.9s, 46.5s and 54.0s -- short every time, by
+    5% to 15%, and sixteen seconds of voice ran past the end of the video. The
+    pacing rule's 30% tolerance passes all four, because each one individually
+    is close. The lesson is still wrong.
+
+    Asking the model again is the expensive answer to a problem that is not
+    really about the model: it chose sensible *relative* durations and a
+    conservative total. So the totals are corrected here instead. The IR is
+    data, the correction is arithmetic, and it is exact -- which is the whole
+    argument for having an IR stage at all.
+
+    Scaling is uniform, so which beat gets more time stays the layout's
+    decision. Putting the difference into a trailing `wait` was the
+    alternative and is worse: the animation would finish early and the viewer
+    would watch a still frame while the voice caught up, which is the thing
+    the layout prompt warns against.
+    """
+    issues: list[Issue] = []
+    scenes = []
+    for index, scene in enumerate(document.scenes):
+        beat = next((b for b in lesson.scenes if b.id == scene.id), None)
+        current = sum(step.duration for step in scene.steps)
+        if beat is None or not beat.measured or current <= 0:
+            scenes.append(scene)
+            continue
+
+        scale = beat.seconds / current
+        if not MIN_FIT <= scale <= MAX_FIT:
+            # Report rather than apply. A scene this far out is not a rounding
+            # difference, and stretching it to fit would be worse than the
+            # mismatch -- but it should not pass silently either.
+            issues.append(
+                Issue(
+                    "fits-narration",
+                    f"scene {scene.id!r} runs {current:.1f}s against "
+                    f"{beat.seconds:.1f}s of narration, too far out to scale",
+                    f"scenes[{index}]",
+                    Severity.WARNING,
+                )
+            )
+            scenes.append(scene)
+            continue
+
+        scenes.append(
+            replace(
+                scene,
+                steps=tuple(
+                    replace(step, duration=round(step.duration * scale, 2))
+                    for step in scene.steps
+                ),
+            )
+        )
     return replace(document, scenes=tuple(scenes)), tuple(issues)
 
 
@@ -309,5 +388,10 @@ def _read(
 
     document = replace(parsed.document, title=lesson.title or parsed.document.title)
     document, mismatches = carry_narration(document, lesson)
-    issues = parsed.issues + mismatches + ir_rules.check_document(document)
+    # Before the rules run, because the fitted document is the one that gets
+    # rendered, and judging the unfitted one would be judging a draft.
+    document, misfits = fit_to_speech(document, lesson)
+    issues = (
+        parsed.issues + mismatches + misfits + ir_rules.check_document(document)
+    )
     return document, issues, reply

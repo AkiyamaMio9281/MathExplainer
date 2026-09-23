@@ -151,8 +151,19 @@ MATHTEX_STACKED_HEIGHT = 0.95
 AXES_WIDTH = 12.0
 AXES_HEIGHT = 6.0
 
-#: A normal explainer pace, and how far narration may drift from animation.
-WORDS_PER_MINUTE = 150.0
+#: How fast the narration is actually read, and how far it may drift from the
+#: animation under it.
+#:
+#: Measured, not assumed: the 27 narrations from the runs on disk, spoken by
+#: the voice that speaks them in the finished video, came to 4151 words over
+#: 1593.7 seconds -- 156.3 words a minute, with individual scenes between 133.7
+#: and 175.3. The 150.0 this replaces was a plausible guess and was 4% slow.
+#:
+#: The constant only estimates. When speech is synthesised the real duration is
+#: known per scene and is what the layout is given, so this predicts rather
+#: than decides -- but it still sets how many words a scene may carry, and it
+#: times the subtitles of a lesson rendered without audio.
+WORDS_PER_MINUTE = 156.0
 PACING_TOLERANCE = 0.30
 
 #: Below the first a scene reads as a glitch; above the second it loses the

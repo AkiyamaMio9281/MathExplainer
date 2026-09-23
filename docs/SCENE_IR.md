@@ -155,8 +155,9 @@ id clear of Manim's CamelCase classes and its ALLCAPS colour constants.
 |---|---|---|
 | `in-frame` | every box within `|x| <= 6.6`, `y <= 3.8`, `y >= -2.4` | objects off the edge are invisible in the output but render without error; the bottom band is where the subtitles go |
 | `no-overlap` | approximate bounding boxes of simultaneously-visible `text`/`mathtex` do not intersect | overlapping text is the single most common way a generated scene looks broken; every other pairing is normal or is the content itself |
+| `fits-narration` | a scene whose steps are less than half or more than twice its spoken length | the layout is told the measured duration and still misses it; `layout.fit_to_speech` scales the steps to match, and warns instead when the gap is too wide to scale |
 | `unknown-field` | a field the object type or action does not use | usually the model confusing two types; the value is reported and dropped rather than silently carried |
-| `pacing` | `len(narration.split()) / 150 * 60` within 30% of `sum(step durations)` | narration and animation drift apart; 150 wpm is a normal explainer pace |
+| `pacing` | `len(narration.split()) / 156 * 60` within 30% of `sum(step durations)` | narration and animation drift apart; 156 wpm is what the narrating voice was measured at over 4151 words |
 | `scene-length` | total duration between 5 s and 90 s | very short scenes look like glitches, very long ones lose the viewer |
 
 `in-frame` and `no-overlap` are layout-defect detection on a declarative
@@ -240,9 +241,12 @@ Step 4 always produces something renderable, so the ladder terminates.
 
 ## Open questions for the implementer
 
-- **Narration is text only.** No TTS, and no audio track in the MP4. If audio
-  gets added, `duration` becomes an output of the TTS rather than an input to
-  it, and `pacing` becomes an error rather than a warning.
+- ~~**Narration is text only.**~~ -- the lesson is spoken now. `duration` did
+  become an output of the synthesiser rather than an input to it, and the
+  resolution was to move the stage: speech runs before layout, so the layout
+  is handed the measured seconds. The IR itself did not change -- `duration`
+  is still what the scene asks for, and the pacing rule still checks it. What
+  changed is where the number it is checked against comes from.
 - **No camera moves, no 3D.** `ThreeDScene` and camera work are out of scope
   for v1; a `camera` action would be the natural v2 extension.
 - **Colour is a name, not a value.** Hex would be more expressive but makes the

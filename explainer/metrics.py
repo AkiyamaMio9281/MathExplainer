@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import agent, ir_rules, llm, repair
+from . import agent, ir_rules, llm, repair, speech
 
 
 def _rate(part: int, whole: int) -> float | None:
@@ -195,6 +195,33 @@ def record(state: agent.Run, path: Path) -> Path:
         "stopped": state.stopped,
         "error": state.error,
         "summary": summarise(state).as_dict(),
+        # What the voice actually did, per scene. The rate is the constant the
+        # pacing rule and the plan's word bounds are both derived from, so a
+        # run that disagrees with it is the evidence for changing it -- and
+        # `drift` is how far the animation ended up from the audio it was laid
+        # out to fit, which is the number that says whether telling the layout
+        # the measured duration worked.
+        "audio": {
+            "voiced": state.voiced,
+            "subtitled": state.subtitled,
+            "spoken_seconds": round(state.spoken_seconds, 2),
+            "drift": round(state.drift, 2),
+            "words_per_minute": (
+                round(rate, 1)
+                if (rate := speech.measured_rate(state.spoken)) is not None
+                else None
+            ),
+            "scenes": {
+                scene_id: {
+                    "ok": s.ok,
+                    "seconds": round(s.seconds, 2),
+                    "words": len(s.words),
+                    "words_per_minute": round(s.words_per_minute, 1),
+                    "error": s.error,
+                }
+                for scene_id, s in state.spoken.items()
+            },
+        },
         # The layout the rules judged. Without it a warning can only be
         # re-examined by reconstructing the scene from the generated Python,
         # which is what re-checking an estimator against past runs actually

@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import ir, layout, llm, plan as planning, repair, video
+from . import ir, layout, llm, plan as planning, repair, speech, video
 from .ir import Issue
 
 #: What one lesson may cost before the run stops and keeps what it has. The
@@ -95,6 +95,19 @@ class Run:
     stopped: str = ""
     error: str = ""
     subtitled: bool = False
+    #: Each scene's narration as audio, keyed by scene id. Empty when speech
+    #: was switched off; present but not `ok` when it was tried and failed.
+    spoken: dict[str, speech.Spoken] = field(default_factory=dict)
+    voiced: bool = False
+    #: The worst gap between a scene's speech and the clip under it, in
+    #: seconds. Positive means the voice outlasted the animation. This is the
+    #: number that says whether the layout took the measured duration
+    #: seriously, so it is recorded rather than checked and forgotten.
+    drift: float = 0.0
+
+    @property
+    def spoken_seconds(self) -> float:
+        return sum(s.seconds for s in self.spoken.values() if s.ok)
 
     @property
     def rendered(self) -> tuple[repair.Outcome, ...]:
@@ -122,10 +135,17 @@ class Run:
         if self.stopped:
             lines.append(f"  !! stopped early -- {self.stopped}")
         if self.video:
+            missing = [
+                name
+                for name, present in (("subtitles", self.subtitled), ("sound", self.voiced))
+                if not present
+            ]
             lines.append(
                 f"  -> {self.video}"
-                + ("" if self.subtitled else "  (no subtitles)")
+                + (f"  (no {' or '.join(missing)})" if missing else "")
             )
+            if self.voiced and self.drift:
+                lines.append(f"     worst audio/video gap {self.drift:+.2f}s")
         elif self.error:
             lines.append(f"  !! {self.error}")
         return "\n".join(lines)
@@ -133,24 +153,34 @@ class Run:
 
 @dataclass(frozen=True)
 class Stages:
-    """The four things the agent dispatches to, injectable for testing."""
+    """Everything the agent dispatches to, injectable for testing.
+
+    Speech sits between `plan` and `layout` rather than at the end, which is
+    the whole reason the audio lines up. See `run`.
+    """
 
     plan: Callable[..., tuple[planning.LessonPlan | None, tuple[Issue, ...], llm.Reply]]
+    speak: Callable[..., dict[str, speech.Spoken]]
     layout: Callable[..., tuple[ir.Document | None, tuple[Issue, ...], llm.Reply]]
     retry: Callable[..., tuple[ir.Document | None, tuple[Issue, ...], llm.Reply]]
     climb: Callable[..., repair.Outcome]
     concat: Callable[..., object]
+    measure: Callable[..., float | None]
     subtitle: Callable[..., object]
+    sound: Callable[..., object]
 
 
 def default_stages() -> Stages:
     return Stages(
         plan=planning.make,
+        speak=speech.narrate,
         layout=layout.make,
         retry=layout.retry,
         climb=repair.climb,
         concat=video.concat,
-        subtitle=video.subtitle_lesson,
+        measure=video.duration,
+        subtitle=video.subtitle,
+        sound=video.soundtrack,
     )
 
 
@@ -162,6 +192,8 @@ def run(
     budget: Budget | None = None,
     quality: str = "l",
     subtitles: bool = True,
+    audio: bool = True,
+    voice: str = speech.VOICE,
     repair_rounds: int = repair.REPAIR_ROUNDS,
     simplify_rounds: int = repair.SIMPLIFY_ROUNDS,
     stages: Stages | None = None,
@@ -196,6 +228,36 @@ def run(
     state = replace(state, usage=state.usage + reply.usage, plan=lesson, plan_issues=issues)
     if lesson is None or planning.errors(issues):
         return close(error=f"the plan was rejected:\n{planning.report(issues)}")
+
+    # -- speech -------------------------------------------------------------
+    # Here, and not at the end, because speech inverts the timing. Without it
+    # the narration's word count *estimates* how long a scene should run; with
+    # it the synthesiser *decides*, and the layout has to be told before it
+    # spends its budget rather than after. The words are final once the plan
+    # is, so nothing is re-synthesised when a layout is retried or a scene
+    # repaired -- this runs once, before either can happen.
+    #
+    # The cost of getting this wrong is not an error, which is why it is worth
+    # stating: stretching video to meet audio afterwards is a quality loss, and
+    # letting them disagree is a lesson where the voice says "now square both
+    # sides" over an animation that did it eight seconds ago.
+    spoken: dict[str, speech.Spoken] = {}
+    if audio:
+        spoken = stages.speak(
+            [(scene.id, scene.narration) for scene in lesson.scenes],
+            workdir / "audio",
+            voice=voice,
+        )
+        state = replace(state, spoken=spoken)
+        if all(spoken.get(scene.id, speech.Spoken(False)).ok for scene in lesson.scenes):
+            lesson = replace(
+                lesson,
+                scenes=tuple(
+                    replace(scene, seconds=spoken[scene.id].seconds)
+                    for scene in lesson.scenes
+                ),
+            )
+            state = replace(state, plan=lesson)
 
     # -- layout -------------------------------------------------------------
     document: ir.Document | None = None
@@ -267,23 +329,99 @@ def run(
         return close(error=f"scenes rendered but would not join: {joined.error}")
     lesson = getattr(joined, "output", None)
 
+    if lesson is None:
+        return close(error="the scenes joined but produced no file")
+
+    # -- where each scene starts --------------------------------------------
+    # Measured from the clips rather than taken from the IR: what a scene asked
+    # for and what manim produced differ slightly every time, and over six
+    # scenes that drift is enough to put a subtitle under the wrong animation
+    # and the voice over the wrong one. Probed once, and used for both.
+    rendered = [o for o in outcomes if o.video]
+    starts: list[float] = []
+    at = 0.0
+    for outcome in rendered:
+        starts.append(at)
+        at += max(stages.measure(outcome.video) or 0.0, 0.0)
+    total = at
+
     # -- subtitles ----------------------------------------------------------
-    # A silent animation is not an explainer: the narration decided how long
-    # every scene runs and then never reached the viewer. Burning it in is the
-    # cheap half of fixing that -- speech would invert the timing, since a
-    # scene's length would become an output of the synthesiser rather than an
-    # input to the layout.
+    # The words reach a viewer who has the sound off, or who is reading a
+    # formula rather than parsing it by ear. Burned in either way.
+    #
+    # When the narration was spoken, the synthesiser said when each word was
+    # said, so the cues land on the syllable. Otherwise they are shared out
+    # across the scene by word count, which is the best an estimate can do: a
+    # long word and a short one do not take the same time to say.
+    voiced_all = bool(spoken) and all(
+        spoken.get(o.scene.id, speech.Spoken(False)).ok for o in rendered
+    )
     burned = False
-    note = ""
-    if subtitles and lesson is not None:
-        narrated = [(o.scene.narration, o.video) for o in outcomes if o.video]
-        result = stages.subtitle(lesson, narrated)
+    notes: list[str] = []
+    if subtitles:
+        if voiced_all:
+            cues = video.spoken_cues(
+                [(spoken[o.scene.id].words, start) for o, start in zip(rendered, starts)]
+            )
+        else:
+            cues = video.cues_from(
+                [
+                    (o.scene.narration, (end - start))
+                    for o, start, end in zip(rendered, starts, starts[1:] + [total])
+                ]
+            )
+        result = stages.subtitle(lesson, cues)
         burned = bool(getattr(result, "ok", False))
         if not burned:
             # Losing the subtitles is not losing the lesson.
-            note = f"subtitles were not burned in: {getattr(result, 'error', '')}"
+            notes.append(f"subtitles were not burned in: {getattr(result, 'error', '')}")
 
-    return close(ok=True, video=lesson, subtitled=burned, error=note)
+    # -- sound ---------------------------------------------------------------
+    # After the burn, because burning re-encodes the video and this does not.
+    voiced = False
+    drift = 0.0
+    if voiced_all:
+        drift = max(
+            (
+                spoken[o.scene.id].seconds - (end - start)
+                for o, start, end in zip(rendered, starts, starts[1:] + [total])
+            ),
+            default=0.0,
+        )
+        # To the end of the picture or the end of the sentence, whichever is
+        # later. `fit_to_speech` should make these the same to within a frame,
+        # but if it has not, a track cut at the video's length would take the
+        # last syllable of the lesson with it -- and a second of audio past
+        # the final frame is much the smaller fault.
+        result = stages.sound(
+            lesson,
+            [(spoken[o.scene.id].path, start) for o, start in zip(rendered, starts)],
+            total=max(
+                total,
+                max(
+                    (start + spoken[o.scene.id].seconds
+                     for o, start in zip(rendered, starts)),
+                    default=0.0,
+                ),
+            ),
+        )
+        voiced = bool(getattr(result, "ok", False))
+        if not voiced:
+            notes.append(f"the narration was not added: {getattr(result, 'error', '')}")
+    elif audio:
+        failed = [
+            s.error for s in spoken.values() if not s.ok
+        ] or ["no narration was synthesised"]
+        notes.append(f"the lesson is silent: {failed[0]}")
+
+    return close(
+        ok=True,
+        video=lesson,
+        subtitled=burned,
+        voiced=voiced,
+        drift=drift,
+        error="; ".join(notes),
+    )
 
 
 def issues_of(state: Run) -> tuple[Issue, ...]:

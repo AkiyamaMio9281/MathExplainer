@@ -20,13 +20,23 @@ So the inputs are probed first, and the answer decides the method:
 Falling back rather than failing is the same choice made everywhere else here:
 a lesson that renders is worth more than a clean error about a frame rate.
 
-There is no audio track. Narration is text in the IR, so every stream is
-video-only, and the concat filter is told so explicitly -- ``a=0`` rather than
-letting ffmpeg look for audio that is not there. The words reach the viewer as
-burned-in subtitles instead, which is why this module builds SRT: a silent
-animation is not an explainer, and subtitles buy the words without the timing
-inversion that speech would bring -- with speech, a scene's length becomes an
-output of the synthesiser rather than an input to the layout.
+**The clips themselves are silent** -- narration is text in the IR, so every
+rendered stream is video-only, and the concat filter is told so explicitly
+(``a=0`` rather than letting ffmpeg look for audio that is not there). Sound
+arrives afterwards: ``speech`` synthesises each scene's narration, ``audio_track``
+lays those files onto one timeline, and ``mux`` puts it on the joined lesson.
+
+That ordering is why the audio is *placed* rather than concatenated. Each
+scene's speech is delayed to its own start offset, so a scene whose voice runs
+slightly long cannot shift every later scene out of step; the error stays local
+instead of accumulating. The subtitles come from the same source -- the
+synthesiser reports when each word is said, so ``spoken_cues`` puts a line up
+on the syllable, where ``cues_for`` could only share the scene out by word
+count.
+
+The words still reach a viewer who has no sound, because the subtitles are
+burned in either way. A silent lesson remains a working lesson: if speech
+fails, nothing here does.
 
 Subprocesses go through ``sandbox.run``, so ffmpeg gets the same allowlisted
 environment as generated Python. It has no business reading an API key either.
@@ -46,7 +56,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from .sandbox import Completed, run
 
@@ -445,3 +455,188 @@ def subtitle_lesson(
     """
     timed = [(narration, duration(clip) or 0.0) for narration, clip in scenes]
     return subtitle(video_path, cues_from(timed), timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Sound
+# ---------------------------------------------------------------------------
+
+#: One track, one channel, at a rate everything downstream is happy with.
+AUDIO_RATE = 44_100
+
+
+def audio_track(
+    placements: Sequence[tuple[Path, float]],
+    output: Path,
+    total: float,
+    timeout: float = 900.0,
+) -> Concatenated:
+    """Lay each scene's narration at its own start time on one track.
+
+    *placements* is ``(audio file, seconds into the lesson)``. Each clip is
+    delayed to its slot rather than concatenated end to end, so alignment is
+    anchored per scene and a scene whose speech runs a little long cannot push
+    every later scene out of step -- it bleeds slightly into the next one
+    instead, which is what a person reading aloud does anyway.
+    """
+    if not placements:
+        return Concatenated(False, method="audio", error="nothing to say")
+    if not available():
+        return Concatenated(False, method="audio", error="ffmpeg is not on PATH")
+
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    args = [FFMPEG, "-y"]
+    for path, _ in placements:
+        args += ["-i", str(path.resolve())]
+
+    parts = []
+    for index, (_, start) in enumerate(placements):
+        milliseconds = max(int(round(start * 1000)), 0)
+        parts.append(f"[{index}:a]adelay={milliseconds}|{milliseconds}[d{index}]")
+    mixed = "".join(f"[d{i}]" for i in range(len(placements)))
+    # normalize=0 keeps one voice at one voice's volume rather than dividing
+    # it by the number of inputs.
+    parts.append(f"{mixed}amix=inputs={len(placements)}:normalize=0[out]")
+
+    args += [
+        "-filter_complex",
+        ";".join(parts),
+        "-map",
+        "[out]",
+        "-ar",
+        str(AUDIO_RATE),
+        "-ac",
+        "1",
+        "-t",
+        f"{max(total, 0.1):.3f}",
+        str(output),
+    ]
+    done = run(args, cwd=output.parent, timeout=timeout)
+    return _result(done, output, "audio")
+
+
+def mux(video_path: Path, audio_path: Path, timeout: float = 900.0) -> Concatenated:
+    """Put *audio_path* onto *video_path*, in place.
+
+    The video is always copied rather than re-encoded -- it has just been
+    through the subtitle burn, and a second pass would cost quality for
+    nothing. The audio is copied too when the container will take it as it is,
+    which is the normal case here because `soundtrack` writes AAC in an M4A;
+    a stream mp4 will not carry falls back to encoding, the same copy-first
+    shape the concat path uses and for the same reason.
+
+    That fallback matters because it avoids a *second* lossy encode. Speech at
+    a low bitrate re-encoded once more is audibly worse, and the first version
+    of this did it on every run.
+    """
+    if not video_path.is_file():
+        return Concatenated(False, method="mux", error=f"missing: {video_path}")
+    if not audio_path.is_file():
+        return Concatenated(False, method="mux", error=f"missing: {audio_path}")
+
+    video_path = video_path.resolve()
+    combined = video_path.with_name(f"{video_path.stem}-sound.mp4")
+
+    def attempt(codec: str) -> Completed:
+        return run(
+            [
+                FFMPEG, "-y",
+                "-i", str(video_path),
+                "-i", str(audio_path.resolve()),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", codec,
+                *(() if codec == "copy" else ("-b:a", "128k")),
+                str(combined),
+            ],
+            cwd=video_path.parent,
+            timeout=timeout,
+        )
+
+    method = "mux"
+    done = attempt("copy")
+    if not done.ok or not combined.is_file() or combined.stat().st_size == 0:
+        combined.unlink(missing_ok=True)
+        method = "mux-reencode"
+        done = attempt("aac")
+
+    if not done.ok or not combined.is_file() or combined.stat().st_size == 0:
+        combined.unlink(missing_ok=True)
+        return Concatenated(
+            False, method=method, seconds=done.seconds, error=done.failure_text()
+        )
+    combined.replace(video_path)
+    return Concatenated(True, output=video_path, method=method, seconds=done.seconds)
+
+
+def soundtrack(
+    video_path: Path,
+    placements: Sequence[tuple[Path, float]],
+    total: float,
+    timeout: float = 900.0,
+) -> Concatenated:
+    """Build the narration track and put it on *video_path*, in place.
+
+    Two ffmpeg passes rather than one: the track is written to a file first so
+    that a failure to *build* it is distinguishable from a failure to attach
+    it, and so the track survives the run for anyone wanting to listen to it
+    on its own.
+    """
+    track = video_path.resolve().with_name(f"{video_path.stem}-narration.m4a")
+    built = audio_track(placements, track, total, timeout=timeout)
+    if not built.ok:
+        return built
+    return mux(video_path, track, timeout=timeout)
+
+
+def spoken_cues(
+    scenes: Sequence[tuple[Sequence[Any], float]],
+    words_per_cue: int = WORDS_PER_CUE,
+) -> list[Cue]:
+    """Subtitles placed on the syllable, from the synthesiser's own timings.
+
+    *scenes* is ``(words, seconds into the lesson)`` where each word carries
+    ``start``, ``end`` and ``text``. Grouping is the same as for estimated
+    cues -- sentences first, then a word limit -- but each cue now begins and
+    ends when its words are actually said, rather than at a share of the scene
+    proportional to its length. A long word and a short one do not take the
+    same time to say, which is all the estimate could assume.
+    """
+    cues: list[Cue] = []
+    for words, offset in scenes:
+        for chunk in _group(words, words_per_cue):
+            cues.append(
+                Cue(
+                    offset + chunk[0].start,
+                    offset + chunk[-1].end,
+                    _wrap(" ".join(word.text for word in chunk)),
+                )
+            )
+    return cues
+
+
+def _group(words: Sequence[Any], words_per_cue: int) -> list[list[Any]]:
+    """`_split`'s rule -- sentences first, then a word limit -- over objects.
+
+    Grouping the words themselves rather than joining their text and splitting
+    it again. The two are the same for ordinary narration and stop being the
+    same the moment one word carries a space: the chunks would still be right
+    and the timings taken from them would be off by one from there on, for the
+    rest of the scene.
+    """
+    chunks: list[list[Any]] = []
+    current: list[Any] = []
+    for word in words:
+        if not word.text.strip():
+            continue
+        current.append(word)
+        ends_sentence = word.text.rstrip().endswith((".", "!", "?"))
+        if ends_sentence or len(current) == words_per_cue:
+            chunks.append(current)
+            current = []
+    if current:
+        chunks.append(current)
+    return chunks

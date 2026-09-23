@@ -1,6 +1,6 @@
 # Architecture
 
-## The five stages
+## The six stages
 
 ```
   Prompt                 "explain why the derivative of sin is cos"
@@ -9,6 +9,10 @@
     v
   Lesson Plan            pedagogy: what to teach, in what order, in what words
     |                    { title, audience, scenes: [{ id, beat, narration }] }
+    |  TTS
+    v
+  Narration audio        one mp3 a scene, plus when every word is said
+    |                    the synthesiser's length is now the layout's budget
     |  LLM
     v
   Scene IR               layout: what is on screen, where, and when
@@ -21,9 +25,9 @@
     v
   Per-scene MP4s
     |
-    |  ffmpeg concat, then the narration burned in as subtitles
+    |  ffmpeg: concat, burn the subtitles, then lay the voice on top
     v
-  lesson.mp4
+  lesson.mp4             narrated, captioned
 ```
 
 ### Why Scene IR is its own stage
@@ -88,7 +92,9 @@ state = {
 | `simplify_ir` | `(scene, reason) -> scene` | escalation target |
 | `render` | `code -> Path` | `explainer/validate.py::render` |
 | `concat` | `[Path] -> Path` | ffmpeg |
-| `subtitle` | `(Path, [(narration, clip)]) -> Path` | ffmpeg; timed by each clip's measured length |
+| `speak` | `[(id, narration)] -> {id: Spoken}` | edge-tts; audio plus per-word timings |
+| `subtitle` | `(Path, [Cue]) -> Path` | ffmpeg; cues timed by the synthesiser when there is one |
+| `sound` | `(Path, [(mp3, start)]) -> Path` | ffmpeg; each scene placed at its own offset |
 
 ### The escalation ladder
 

@@ -65,9 +65,25 @@ class Beat:
     id: str
     beat: str  # what this scene teaches, for the IR stage to lay out
     narration: str  # the words spoken over it
+    #: How long this narration takes to say, once something has said it. Zero
+    #: until then, which is the honest value -- an unmeasured scene has an
+    #: estimate, not a duration.
+    seconds: float = 0.0
+
+    @property
+    def measured(self) -> bool:
+        return self.seconds > 0.0
 
     @property
     def spoken_seconds(self) -> float:
+        """The scene's length: measured if it has been, estimated otherwise.
+
+        Both callers -- the layout's timing budget and the pacing rule -- want
+        the best number available rather than specifically the estimate, so the
+        substitution happens here instead of at each of them.
+        """
+        if self.measured:
+            return self.seconds
         return len(self.narration.split()) / WORDS_PER_MINUTE * 60.0
 
 
@@ -80,6 +96,11 @@ class LessonPlan:
     @property
     def spoken_seconds(self) -> float:
         return sum(scene.spoken_seconds for scene in self.scenes)
+
+    @property
+    def measured(self) -> bool:
+        """Whether every scene's length is known rather than predicted."""
+        return bool(self.scenes) and all(scene.measured for scene in self.scenes)
 
     def to_dict(self) -> dict[str, Any]:
         return {

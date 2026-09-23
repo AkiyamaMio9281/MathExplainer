@@ -401,3 +401,365 @@ def test_a_short_sentence_stays_whole_however_short():
     cues = video.cues_for("Yes. No. Maybe so.", 0.0, 6.0)
 
     assert [c.text for c in cues] == ["Yes.", "No.", "Maybe so."]
+
+
+# ---------------------------------------------------------------------------
+# Sound
+# ---------------------------------------------------------------------------
+
+
+def make_tone(path: Path, seconds=1.0, frequency=440) -> Path:
+    """A clip of audible sine, for checking where it ended up."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    done = run(
+        [
+            video.FFMPEG, "-y", "-f", "lavfi",
+            "-i", f"sine=frequency={frequency}:duration={seconds}",
+            str(path.resolve()),
+        ],
+        cwd=path.parent,
+        timeout=120,
+    )
+    assert done.ok, done.failure_text()
+    return path
+
+
+def loudness(path: Path, start: float, end: float) -> float:
+    """Mean volume in dB over one window. Digital silence reports about -91."""
+    done = run(
+        [
+            video.FFMPEG, "-i", str(path.resolve()),
+            "-af", f"atrim=start={start}:end={end},volumedetect",
+            "-f", "null", "-",
+        ],
+        cwd=path.parent,
+        timeout=120,
+    )
+    assert done.ok, done.failure_text()
+    for line in (done.stdout + done.stderr).splitlines():
+        if "mean_volume:" in line:
+            return float(line.split("mean_volume:")[1].split("dB")[0])
+    raise AssertionError(f"volumedetect said nothing:\n{done.stdout}{done.stderr}")
+
+
+SILENT = -80.0  # anything quieter than this is silence, not speech
+
+
+@pytest.mark.slow
+def test_each_scenes_narration_lands_at_its_own_start(tmp_path):
+    # The property the whole audio stage rests on. Two one-second tones, the
+    # second placed at five seconds, must be audible there and nowhere else --
+    # concatenating them instead would put the second at one second.
+    first = make_tone(tmp_path / "a.mp3")
+    second = make_tone(tmp_path / "b.mp3")
+
+    built = video.audio_track([(first, 0.0), (second, 5.0)], tmp_path / "t.m4a", 8.0)
+
+    assert built.ok, built.error
+    assert loudness(built.output, 0.0, 1.0) > SILENT      # first scene
+    assert loudness(built.output, 1.5, 4.5) < SILENT      # the gap between
+    assert loudness(built.output, 5.0, 6.0) > SILENT      # second scene
+    # The track ends with the last word rather than being padded out to the
+    # video's length: a player carries on through silence it does not have.
+    assert video.duration(built.output) == pytest.approx(6.0, abs=0.15)
+
+
+@pytest.mark.slow
+def test_a_scene_that_runs_long_does_not_shift_the_ones_after_it(tmp_path):
+    # Placement rather than concatenation is what bounds the error. A scene
+    # whose voice overruns bleeds into the next one; it does not push every
+    # later scene out by the overrun, and it does not accumulate.
+    long_one = make_tone(tmp_path / "long.mp3", seconds=3.0)
+    late = make_tone(tmp_path / "late.mp3", seconds=1.0)
+
+    built = video.audio_track([(long_one, 0.0), (late, 5.0)], tmp_path / "t.m4a", 8.0)
+
+    assert built.ok, built.error
+    # The late scene is still at five seconds, not at three.
+    assert loudness(built.output, 3.5, 4.8) < SILENT
+    assert loudness(built.output, 5.1, 5.9) > SILENT
+
+
+@pytest.mark.slow
+def test_the_track_is_cut_to_the_length_of_the_video(tmp_path):
+    # An audio stream longer than the video makes a file whose scrubber runs
+    # past the last frame, and whichever player is asked disagrees about how
+    # long the lesson is.
+    tone = make_tone(tmp_path / "a.mp3", seconds=10.0)
+
+    built = video.audio_track([(tone, 0.0)], tmp_path / "t.m4a", 4.0)
+
+    assert built.ok, built.error
+    assert video.duration(built.output) == pytest.approx(4.0, abs=0.15)
+
+
+@pytest.mark.slow
+def test_one_voice_stays_one_voice_however_many_scenes_there_are(tmp_path):
+    # ffmpeg's amix normalises by input count unless told not to, so the same
+    # narration would get quieter the more scenes a lesson had.
+    tone = make_tone(tmp_path / "a.mp3")
+    alone = video.audio_track([(tone, 0.0)], tmp_path / "one.m4a", 8.0)
+    among = video.audio_track(
+        [(tone, 0.0), (tone, 2.0), (tone, 4.0), (tone, 6.0)], tmp_path / "four.m4a", 8.0
+    )
+
+    assert alone.ok and among.ok
+    assert loudness(among.output, 0.0, 1.0) == pytest.approx(
+        loudness(alone.output, 0.0, 1.0), abs=0.5
+    )
+
+
+@pytest.mark.slow
+def test_the_sound_reaches_the_lesson_without_re_encoding_the_picture(tmp_path):
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    before = video.probe(clip)
+    tone = make_tone(tmp_path / "a.mp3", seconds=2.0)
+
+    result = video.soundtrack(clip, [(tone, 0.0)], total=2.0)
+
+    assert result.ok, result.error
+    assert result.output == clip
+    assert has_audio(clip)
+    # The picture is the same picture: copied, not encoded a second time.
+    assert video.probe(clip) == before
+
+
+@pytest.mark.slow
+def test_the_track_survives_the_run_as_a_file_of_its_own(tmp_path):
+    # Two passes rather than one, so a track that would not build is
+    # distinguishable from one that would not attach -- and so it can be
+    # listened to on its own.
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    video.soundtrack(clip, [(make_tone(tmp_path / "a.mp3", 2.0), 0.0)], total=2.0)
+
+    assert (tmp_path / "lesson-narration.m4a").is_file()
+
+
+@pytest.mark.slow
+def test_a_lesson_keeps_its_name_when_it_gains_a_voice(tmp_path):
+    # ffmpeg cannot read and write one file, so this writes a neighbour and
+    # replaces. The neighbour must not survive: two lessons in the directory
+    # and only one of them with sound is worse than either.
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    video.soundtrack(clip, [(make_tone(tmp_path / "a.mp3", 2.0), 0.0)], total=2.0)
+
+    assert clip.is_file()
+    assert not (tmp_path / "lesson-sound.mp4").exists()
+
+
+def has_audio(path: Path) -> bool:
+    done = run(
+        [
+            video.FFPROBE, "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+            str(path.resolve()),
+        ],
+        cwd=path.parent,
+        timeout=60,
+    )
+    return "audio" in done.stdout
+
+
+def test_nothing_to_say_is_reported_rather_than_run(tmp_path):
+    assert not video.audio_track([], tmp_path / "t.m4a", 4.0).ok
+
+
+def test_muxing_onto_a_lesson_that_is_not_there_says_which_file(tmp_path):
+    result = video.mux(tmp_path / "gone.mp4", tmp_path / "also-gone.m4a")
+
+    assert not result.ok
+    assert "gone.mp4" in result.error
+
+
+@pytest.mark.slow
+def test_a_track_that_will_not_build_is_not_muxed(tmp_path):
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    result = video.soundtrack(clip, [(tmp_path / "missing.mp3", 0.0)], total=2.0)
+
+    assert not result.ok
+    assert not has_audio(clip)
+
+
+# ---------------------------------------------------------------------------
+# Subtitles from what was actually said
+# ---------------------------------------------------------------------------
+
+
+def spoken(*pairs) -> list:
+    from explainer.speech import Word
+
+    return [Word(start, end, text) for start, end, text in pairs]
+
+
+def test_a_cue_starts_and_ends_when_its_words_are_said():
+    words = spoken((0.0, 0.4, "Two"), (0.4, 0.9, "is"), (1.6, 2.4, "prime."))
+
+    cues = video.spoken_cues([(words, 0.0)])
+
+    assert len(cues) == 1
+    assert cues[0].start == pytest.approx(0.0)
+    assert cues[0].end == pytest.approx(2.4)
+    assert cues[0].text == "Two is prime."
+
+
+def test_the_timings_are_the_synthesisers_not_a_share_of_the_scene():
+    # The estimate this replaces gave every word the same length. Here the
+    # narration is said in the first two seconds of a thirty-second scene, and
+    # the cue must come down when the voice does rather than hold for thirty.
+    cues = video.spoken_cues([(spoken((0.0, 0.5, "Hello"), (0.5, 2.0, "there.")), 0.0)])
+
+    assert cues[0].end == pytest.approx(2.0)
+
+
+def test_each_scenes_words_are_offset_to_where_that_scene_starts():
+    # The synthesiser times each scene from its own zero.
+    words = spoken((0.0, 1.0, "Hello."))
+
+    cues = video.spoken_cues([(words, 0.0), (words, 12.5)])
+
+    assert [c.start for c in cues] == pytest.approx([0.0, 12.5])
+    assert [c.end for c in cues] == pytest.approx([1.0, 13.5])
+
+
+def test_a_sentence_too_long_for_one_cue_is_split_on_its_own_timings():
+    words = spoken(*[(i * 0.5, i * 0.5 + 0.4, f"w{i}") for i in range(20)])
+
+    cues = video.spoken_cues([(words, 0.0)], words_per_cue=12)
+
+    assert len(cues) == 2
+    assert cues[0].start == pytest.approx(0.0)
+    assert cues[0].end == pytest.approx(11 * 0.5 + 0.4)   # the twelfth word
+    assert cues[1].start == pytest.approx(12 * 0.5)       # the thirteenth
+    assert cues[1].end == pytest.approx(19 * 0.5 + 0.4)
+
+
+def test_cues_break_at_sentence_ends_here_too():
+    words = spoken(
+        (0.0, 0.4, "One."), (1.0, 1.4, "Two."), (2.0, 2.4, "Three.")
+    )
+
+    cues = video.spoken_cues([(words, 0.0)])
+
+    assert [c.text for c in cues] == ["One.", "Two.", "Three."]
+
+
+def test_a_scene_with_nothing_said_contributes_no_cues():
+    cues = video.spoken_cues([([], 0.0), (spoken((0.0, 1.0, "Hello.")), 5.0)])
+
+    assert len(cues) == 1
+    assert cues[0].start == pytest.approx(5.0)
+
+
+def test_spoken_cues_wrap_the_same_way_estimated_ones_do():
+    words = spoken(*[(i * 0.3, i * 0.3 + 0.2, "supercalifragilistic") for i in range(4)])
+
+    cue = video.spoken_cues([(words, 0.0)])[0]
+
+    assert cue.text.count(video.NEWLINE) == 1
+
+
+@pytest.mark.slow
+def test_the_narration_is_copied_rather_than_encoded_a_second_time(tmp_path):
+    # `soundtrack` writes AAC in an M4A, which mp4 takes as it is. Encoding it
+    # again would be a second lossy pass over speech that is already at a low
+    # bitrate.
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    result = video.soundtrack(clip, [(make_tone(tmp_path / "a.mp3", 2.0), 0.0)], total=2.0)
+
+    assert result.ok, result.error
+    assert result.method == "mux"
+
+
+@pytest.mark.slow
+def test_a_stream_mp4_will_not_carry_is_encoded_rather_than_refused(
+    tmp_path, monkeypatch
+):
+    # A copy the container rejects is a fallback, not a failure -- the same
+    # shape the concat path uses when the clips disagree.
+    #
+    # The refusal has to be induced. This ffmpeg build muxes PCM, Vorbis, Opus
+    # and MP3 into mp4 without complaint, so there is no audio file to hand it
+    # that would make the copy fail; what is being tested is that a failed
+    # copy is retried as an encode, so the first copy is made to fail.
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    tone = make_tone(tmp_path / "a.mp3", seconds=2.0)
+    real = video.run
+    seen = []
+
+    def once(args, **kwargs):
+        seen.append(args)
+        if len(seen) == 1:
+            assert "copy" in args, "the first attempt should be the copy"
+            return real([video.FFMPEG, "-thereisnosuchflag"], **kwargs)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(video, "run", once)
+    result = video.mux(clip, tone)
+
+    assert result.ok, result.error
+    assert result.method == "mux-reencode"
+    assert len(seen) == 2
+    assert has_audio(clip)
+
+
+@pytest.mark.slow
+def test_a_mux_that_fails_both_ways_leaves_the_lesson_as_it_was(tmp_path, monkeypatch):
+    clip = make_clip(tmp_path / "lesson.mp4", seconds=2.0)
+    before = clip.read_bytes()
+    real = video.run
+    monkeypatch.setattr(
+        video, "run", lambda args, **kw: real([video.FFMPEG, "-nope"], **kw)
+    )
+
+    result = video.mux(clip, make_tone(tmp_path / "a.mp3", 2.0))
+
+    assert not result.ok
+    assert clip.read_bytes() == before
+    assert not (tmp_path / "lesson-sound.mp4").exists()
+
+
+def test_a_word_carrying_a_space_does_not_slide_every_later_cue():
+    # The first version joined the word texts and split the string again,
+    # which desynchronises from the timings at the first word containing
+    # whitespace -- and stays wrong for the rest of the scene.
+    words = spoken(
+        (0.0, 1.0, "New York"), (1.0, 2.0, "is"), (2.0, 3.0, "big.")
+    )
+
+    cues = video.spoken_cues([(words, 0.0)])
+
+    assert len(cues) == 1
+    assert cues[0].end == pytest.approx(3.0)
+    assert cues[0].text == "New York is big."
+
+
+def test_an_empty_word_is_skipped_rather_than_given_a_cue():
+    words = spoken((0.0, 1.0, "Hello."), (1.0, 1.0, "  "), (1.2, 2.0, "There."))
+
+    cues = video.spoken_cues([(words, 0.0)])
+
+    assert [c.text for c in cues] == ["Hello.", "There."]
+
+
+@pytest.mark.parametrize(
+    "narration",
+    [
+        "One two three. Four five six.",
+        "A sentence with rather a lot of words in it indeed, going on and on past twelve.",
+        "Short. Then a longer one that needs breaking up because it has many words.",
+    ],
+)
+def test_the_two_splitters_group_the_same_words_the_same_way(narration):
+    # `cues_for` splits a string, `spoken_cues` groups objects, and they are
+    # meant to be the same rule. If they drift apart a lesson's captions change
+    # shape depending on whether the narration was spoken, which is not a
+    # difference anyone asked for.
+    from explainer.speech import Word
+
+    tokens = narration.split()
+    words = [Word(i, i + 1, t) for i, t in enumerate(tokens)]
+
+    by_string = video._split(narration, video.WORDS_PER_CUE)
+    by_object = video._group(words, video.WORDS_PER_CUE)
+
+    assert [[w.text for w in chunk] for chunk in by_object] == by_string

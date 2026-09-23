@@ -10,7 +10,7 @@ re-run the checks in "Verify the environment" before trusting them.
 ## 1. What this project is for
 
 A prompt goes in, a finished math explainer video comes out. Read
-`ARCHITECTURE.md` for the five stages and `SCENE_IR.md` for the layout format.
+`ARCHITECTURE.md` for the six stages and `SCENE_IR.md` for the layout format.
 
 It is also portfolio work for a specific job posting, and that shapes the
 priorities. The role is a Huawei Canada co-op, "Researcher — Web & AI", on the
@@ -136,10 +136,11 @@ explainer/
   ir_rules.py    12 validation rules             done, tested
   llm.py         Anthropic client + costing      done, verified live
   plan.py        prompt -> LessonPlan            done, verified live
+  speech.py      narration -> audio + timings    done, verified live
   layout.py      LessonPlan -> SceneIR           done, verified live
   codegen.py     IR scene -> Manim source        done, verified live
   repair.py      simplify_ir + escalation ladder done, tested
-  video.py       ffmpeg concat                   done, tested
+  video.py       concat, subtitles, sound        done, tested
   agent.py       state, dispatch, dollar budget  done, verified live
   metrics.py     attempt log + run summary       done, tested
   spine.py       document -> mp4, no agent       done, verified live
@@ -234,6 +235,162 @@ Two consequences:
 
 **Cold start is 9.2 s.** The first-ever manim invocation builds LaTeX and font
 caches. Warm runs are the numbers above. Do not benchmark the first run.
+
+### Speech, and the stage that had to move (2026-09-23)
+
+The lesson has a voice. `edge-tts` speaks through the endpoint Microsoft Edge's
+read-aloud uses: free, no key, no account, and **not an official API** -- it can
+change or disappear without notice and it needs a network connection. Every
+failure path in `speech.py` returns a `Spoken` that says it did not work, and
+the pipeline falls back to the silent-with-subtitles lesson it made before.
+
+**The timing inversion was real, and the fix was to move the stage, not to
+adjust afterwards.** Without speech, a scene's narration *estimates* how long
+that scene should run. With speech the synthesiser *decides*. Two orderings
+were available:
+
+- Speak last, then reconcile. Either stretch the video to meet the audio
+  (quality loss, and manim has already encoded) or pad the audio and let them
+  drift apart. Both are corrections applied to a mismatch that has already
+  happened.
+- Speak *between* `plan` and `layout`, and hand the layout the measured
+  seconds as its budget. The words are final once the plan is, so nothing is
+  re-synthesised when a layout is retried or a scene repaired -- it runs once,
+  before either can happen.
+
+The second is what `agent.run` does. The audio and the animation line up by
+construction. `plan.Beat.seconds` carries the measurement, `Beat.spoken_seconds`
+returns it when present and the word-count estimate otherwise, and
+`layout.plan_prompt` states which of the two the model is being given -- an
+estimate is a target to come close to, a measurement is a length to fill.
+
+**Telling the layout the duration is not enough; it has to be fitted.** The
+first voiced run showed this straight away, which is what `Run.drift` was added
+to reveal. Every scene was told its measured length and every scene came in
+short:
+
+```
+scene              asked   clip  voice     gap
+the_claim           44.5   44.7   46.9   +2.14
+tear_the_corners    42.5   42.7   48.9   +6.21
+parallel_line       41.5   41.9   46.5   +4.59
+landing             50.5   50.7   54.0   +3.27
+```
+
+Sixteen seconds of voice past the end of a 180-second video, and the last
+scene's closing words cut off. `pacing` passes all four, because each one
+individually is within 30%. The lesson is still wrong.
+
+The fix is `layout.fit_to_speech`, and it is arithmetic rather than another
+model call: each scene's step durations are scaled uniformly so the total
+equals the measured narration. **This is the clearest payoff the IR stage has
+produced.** The layout's output is data, so a systematic error in it can be
+corrected exactly, once, in six lines -- with generated code there would be
+nothing to scale.
+
+The same prompt, run again with the fit in place:
+
+```
+scene                  asked   clip  voice     gap
+the_claim               52.4   52.9   52.4   -0.50
+tear_and_rearrange      55.2   55.6   55.1   -0.45
+parallel_line_proof     73.1   73.4   73.1   -0.30
+where_it_fails          58.6   58.5   58.6   +0.09
+```
+
+Worst gap +6.20s before, **+0.09s after**. What is left is manim rounding
+`run_time` up to whole frames, which is a third of a second a scene and not
+worth chasing. Video 240.43s against 239.18s of voice: nothing is cut.
+
+Uniform, so which beat gets more time stays the layout's decision. Putting the
+whole difference into a trailing `wait` was the alternative and is worse: the
+animation finishes early and the viewer watches a still frame while the voice
+catches up. Scales outside 0.5-2.0 are reported as a `fits-narration` warning
+and left alone -- a sixfold stretch is slow motion, not a correction.
+
+**The speaking rate was wrong and is now measured.** `WORDS_PER_MINUTE` was
+150.0, a plausible guess. Two invented samples suggested 164.5, which was also
+wrong -- a 16-word sample never pauses between sentences. Measured against the
+27 real narrations from the runs on disk, spoken by the voice that actually
+speaks them:
+
+```
+27 narrations   4151 words   1593.7s of audio   156.3 wpm pooled
+per scene       min 133.7    median 156.5       max 175.3
+```
+
+The constant is now 156.0. At that value the median per-scene error is 5.4% and
+the worst is 13.7%, comfortably inside the 30% `PACING_TOLERANCE`. It still
+only *estimates*: when speech runs, the real duration is known per scene and is
+what the layout is given. What it still decides is how many words a scene may
+carry (`plan.MIN_WORDS` / `MAX_WORDS`, both derived) and the subtitle timings
+of a lesson rendered with `--no-audio`.
+
+**Word boundaries must be asked for.** `edge_tts.Communicate` defaults to
+`boundary="SentenceBoundary"`, which returns one timing per sentence -- and a
+sentence too long for one subtitle then has nowhere to be split. Pass
+`boundary="WordBoundary"`. Offsets come back in **100-nanosecond ticks**, an
+unusual unit and an easy one to read as milliseconds, which would put every
+subtitle ten thousand times early.
+
+**Audio is placed, not concatenated.** Each scene's speech is delayed to its
+own start offset with `adelay` and mixed with `amix`, rather than joined end to
+end. Concatenating would make one scene's overrun push every later scene out of
+step, and the error would accumulate down the lesson; placing bounds it to the
+scene that caused it, which bleeds slightly into the next one -- what a person
+reading aloud does anyway. Pass `normalize=0` to `amix`, or one voice gets
+quieter the more scenes the lesson has.
+
+Start offsets come from probing the rendered clips, not from the IR: what a
+scene asked for and what manim produced differ slightly every time.
+
+**Order: burn, then mux.** Burning subtitles re-encodes the picture; muxing
+copies it. The other order pays for a second video encode or loses the audio.
+
+### Which model should generate the code (measured 2026-09-23)
+
+Paired: the same 27 IR scenes, planned and laid out once on Opus and cached,
+handed to three generators. Nothing but the generator changes. Rendering is
+stubbed -- what is being measured is whether generated code *runs*, which L2
+settles, and rasterising it would add minutes and change no number here.
+
+| model | L2 first try | rendered | repairs | simplifications | dropped | cost | time |
+|---|---|---|---|---|---|---|---|
+| `claude-opus-5` | 27/27 | 27/27 | 0 | 0 | 0 | $1.223 | 577 s |
+| `claude-sonnet-5` | 27/27 | 27/27 | 0 | 0 | 0 | $0.482 | 513 s |
+| `claude-haiku-4-5` | 25/27 | 27/27 | 2 | 0 | 0 | $0.558 | 821 s |
+
+Three things worth taking from this.
+
+**Sonnet is the default.** It matched Opus exactly -- 27/27 on the first
+attempt, no repairs -- for 39% of the cost and slightly less wall time. There
+is no measured reason to pay for Opus at this stage. The planning and layout
+stages still run on Opus; they were not varied here.
+
+**Haiku costs more than Sonnet despite half the token price.** Haiku 4.5 has no
+adaptive thinking, so `llm.Capabilities` gives it a fixed 4,000-token budget,
+and a fixed budget spends itself whether the scene needs it or not. Adaptive
+thinking does not. The cheaper model was 16% more expensive and 60% slower.
+*The per-token price is not the price.*
+
+**Both Haiku failures were the same failure**, and it is the kind the ladder
+exists for:
+
+```
+TypeError: Mobject.__init__() got an unexpected keyword argument 'center'
+```
+
+A plausible-looking keyword that manim does not have. L2 caught both, one
+repair round fixed both, and neither reached a render. This is the escalation
+ladder doing exactly the job it was built for -- and it is also why the
+41/41-first-try figure from the eight real runs should not be read as "the
+ladder is unnecessary". It is unnecessary *for Opus and Sonnet on these
+prompts*. Change the model and it starts earning its place immediately.
+
+**Where the money actually goes.** Planning and laying out five lessons cost
+$2.75. Generating code for all 27 scenes three times over cost $2.26. Codegen
+is not the expensive stage; the two structured-output stages that run once per
+lesson are. Optimising codegen further would be optimising the smaller half.
 
 ### Eight runs, forty-one scenes (measured 2026-09-23)
 
@@ -469,13 +626,20 @@ a key.
 
 ## 8. Open questions
 
-- **Narration is burned in as subtitles, not spoken.** There is no audio
-  track. The words reach the viewer, which they did not before -- a silent
-  animation whose scene lengths were decided by narration nobody could read
-  is not an explainer. Adding speech is still open, and still inverts the
-  timing relationship: `duration` becomes an output of the synthesiser
-  rather than an input to the layout, and `pacing` becomes an error rather
-  than a warning.
+- ~~**Narration is burned in as subtitles, not spoken.**~~ -- done. The
+  lesson has a voice. The timing inversion this warned about was real and was
+  resolved by **moving the stage rather than adjusting afterwards**: speech
+  runs between `plan` and `layout`, so the synthesiser's measured duration is
+  what the layout is given as its budget. See §5, "Speech".
+- **`pacing` still checks the estimate, not the measurement.** The layout is
+  told a scene's measured length, but `ir_rules.pacing` compares the step
+  durations against `words / 156 * 60`, because the IR scene does not carry
+  the synthesised duration -- only `plan.Beat` does. The two disagree by about
+  5-6% typically and 14% at worst, well inside the rule's 30% tolerance, so it
+  does not misfire; it is simply checking a slightly different thing from what
+  the layout was asked to do. Threading the measurement into `ir_rules.check`
+  would close it, and would let `pacing` become an error rather than a warning
+  when audio is on -- which is the upgrade SCENE_IR.md anticipated.
 - **Nothing acts on a layout warning.** `in-frame` and `no-overlap` are
   recorded and then ignored. SCENE_IR.md says they may drive `simplify_ir`;
   the ladder only simplifies when code fails to compile, never when a scene

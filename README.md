@@ -33,15 +33,20 @@ repairs and no simplifications, 328 s and $0.70 for 226 s of video. One run is
 not a success rate -- the ablations that turn these into an argument are still
 to come -- but every stage is built and every one has tests.
 
-The lesson has no audio. The narration the plan wrote is burned in as
-subtitles, timed to each scene's rendered length, so the words reach the
-viewer without speech turning scene length into an output of a synthesiser.
-`--no-subtitles` leaves it silent.
+The lesson is narrated and captioned. The narration the plan wrote is spoken
+by `edge-tts` and burned in as subtitles, and the two line up by construction
+rather than by adjustment: speech runs **between** planning and layout, so the
+synthesiser's measured duration is the budget the layout is told to fill. The
+subtitles are placed from the synthesiser's own word timings. `--no-audio`
+leaves it silent but still captioned; `--no-subtitles` drops the captions;
+`--voice` picks a different one.
 
 A finished lesson is checked in at
-[`docs/examples/primes.mp4`](docs/examples/primes.mp4) -- 344 seconds, six
-scenes, subtitles. A pipeline whose output nobody can watch is a claim rather
-than a demonstration.
+[`docs/examples/triangle.mp4`](docs/examples/triangle.mp4) -- 240 seconds, four
+scenes, narrated, worst audio/video gap 0.09s. A pipeline whose output nobody
+can watch is a claim rather than a demonstration.
+[`primes.mp4`](docs/examples/primes.mp4) is the same pipeline before it had a
+voice, kept so the two can be compared.
 
 | Component | State |
 |---|---|
@@ -53,7 +58,8 @@ than a demonstration.
 | `layout.py` -- lesson plan to Scene IR | done |
 | `codegen.py` -- IR scene to Manim source | done |
 | `repair.py` -- repair, simplification, escalation ladder | done |
-| `video.py` -- ffmpeg concatenation and burned-in subtitles | done |
+| `speech.py` -- narration to audio, with per-word timings | done |
+| `video.py` -- ffmpeg concatenation, subtitles, narration track | done |
 | `agent.py` -- state, dispatch, dollar budget | done |
 | `metrics.py` -- attempt log and run summary | done |
 | `cli.py` -- prompt in, mp4 out | done |
@@ -71,7 +77,7 @@ on, and the gotchas that cost time to rediscover.
 | Doc | Contents |
 |---|---|
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | What exists, what is measured, what to build next, known traps |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The five stages, the agent loop, the escalation ladder, metrics |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The six stages, the agent loop, the escalation ladder, metrics |
 | [`docs/SCENE_IR.md`](docs/SCENE_IR.md) | Scene IR schema and its validation rules |
 
 ## Setup

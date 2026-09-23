@@ -16,6 +16,7 @@ vocabulary discovers the ceiling here rather than as a 400 in a live run.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -166,8 +167,24 @@ def test_the_prompt_works_out_each_scenes_timing_budget():
     prompt = layout.plan_prompt(lesson(words=50))
 
     assert "50 words" in prompt
-    assert "20.0s" in prompt  # 50 / 150 * 60
+    assert f"{50 / ir_rules.WORDS_PER_MINUTE * 60:.1f}s" in prompt
     assert "must total about" in prompt
+
+
+def test_a_spoken_scene_is_given_its_measured_length_not_an_estimate():
+    # Once the narration has been synthesised the audio is fixed, so the
+    # animation is being fitted to it. Handing the model a word-count estimate
+    # here would be asking it to fit a length that is no longer the length.
+    plan = lesson(words=50)
+    spoken = replace(
+        plan, scenes=(replace(plan.scenes[0], seconds=31.7),)
+    )
+    prompt = layout.plan_prompt(spoken)
+
+    assert "31.7s" in prompt
+    assert f"{50 / ir_rules.WORDS_PER_MINUTE * 60:.1f}s" not in prompt
+    assert "must total about" not in prompt
+    assert "must fill" in prompt
 
 
 def test_the_preamble_states_the_frame_margin_and_the_pacing_tolerance():
@@ -332,3 +349,131 @@ def test_a_real_layout_satisfies_the_rules_it_was_told_about():
     assert [s.id for s in made.scenes] == ["statement", "relation"]
     # The words are the plan's, unchanged.
     assert made.scenes[0].narration == subject.scenes[0].narration
+
+
+# ---------------------------------------------------------------------------
+# Fitting the animation to the voice
+# ---------------------------------------------------------------------------
+
+
+def timed(*durations: float, scene_id="intro") -> ir.Document:
+    return ir.Document(
+        title="A Lesson",
+        scenes=(
+            ir.Scene(
+                id=scene_id,
+                narration="word " * 40,
+                objects=(ir.Text(id="t", content="x", position=(0.0, 0.0)),),
+                steps=tuple(
+                    ir.Step(action=ir.Action.WAIT, duration=d) for d in durations
+                ),
+            ),
+        ),
+    )
+
+
+def spoken(seconds: float, ids=("intro",)) -> planning.LessonPlan:
+    plan = lesson(ids=ids)
+    return replace(plan, scenes=tuple(replace(b, seconds=seconds) for b in plan.scenes))
+
+
+def test_a_scene_that_undershoots_its_narration_is_stretched_to_meet_it():
+    # Measured on a real run: told 46.9s, produced 44.5s, and every scene was
+    # short. Sixteen seconds of voice ran past the end of the lesson.
+    fitted, issues = layout.fit_to_speech(timed(20.0, 24.5), spoken(46.9))
+
+    assert issues == ()
+    assert sum(s.duration for s in fitted.scenes[0].steps) == pytest.approx(46.9, abs=0.02)
+
+
+def test_an_animation_longer_than_its_narration_is_squeezed(fitted=None):
+    fitted, _ = layout.fit_to_speech(timed(30.0, 30.0), spoken(40.0))
+
+    assert sum(s.duration for s in fitted.scenes[0].steps) == pytest.approx(40.0, abs=0.02)
+
+
+def test_which_beat_gets_more_time_stays_the_layouts_decision():
+    # Uniform, so the model's relative choices survive. Putting the whole
+    # difference into the last step would finish the animation early and leave
+    # the viewer on a still frame while the voice caught up.
+    fitted, _ = layout.fit_to_speech(timed(10.0, 30.0), spoken(60.0))
+    steps = [s.duration for s in fitted.scenes[0].steps]
+
+    assert steps[1] / steps[0] == pytest.approx(3.0)
+    assert steps == pytest.approx([15.0, 45.0])
+
+
+def test_a_scene_too_far_out_to_scale_is_reported_rather_than_stretched():
+    # Ten seconds of animation under a minute of narration is not a rounding
+    # difference, and stretching it six-fold would be slow motion.
+    fitted, issues = layout.fit_to_speech(timed(10.0), spoken(60.0))
+
+    assert [i.rule for i in issues] == ["fits-narration"]
+    assert issues[0].severity is ir.Severity.WARNING
+    assert [s.duration for s in fitted.scenes[0].steps] == [10.0]
+
+
+def test_nothing_is_scaled_when_the_narration_was_never_spoken():
+    # Without audio the word count is an estimate, and fitting an animation to
+    # an estimate to two decimal places would be false precision.
+    fitted, issues = layout.fit_to_speech(timed(20.0, 24.5), lesson())
+
+    assert issues == ()
+    assert [s.duration for s in fitted.scenes[0].steps] == [20.0, 24.5]
+
+
+def test_a_scene_the_plan_does_not_have_is_left_alone():
+    fitted, issues = layout.fit_to_speech(timed(20.0, scene_id="invented"), spoken(46.9))
+
+    assert issues == ()
+    assert [s.duration for s in fitted.scenes[0].steps] == [20.0]
+
+
+def test_a_scene_with_no_time_in_it_is_not_divided_by_zero():
+    fitted, issues = layout.fit_to_speech(timed(0.0, 0.0), spoken(46.9))
+
+    assert issues == ()
+    assert [s.duration for s in fitted.scenes[0].steps] == [0.0, 0.0]
+
+
+def read_back(document: ir.Document, plan: planning.LessonPlan):
+    reply = llm.Reply(
+        text=document.to_json(),
+        usage=llm.Usage(),
+        seconds=0.0,
+        model=llm.MODEL,
+        stop_reason="end_turn",
+    )
+    return layout._read(reply, plan)
+
+
+def test_the_fit_is_applied_before_the_rules_judge_the_document():
+    # The fitted document is the one that gets rendered, so judging the
+    # unfitted one would be judging a draft.
+    #
+    # `pacing` is the rule that notices. Seventy-eight words estimate to about
+    # thirty seconds, so the rule accepts roughly 21s to 39s. This layout asks
+    # for 55s, which it rejects -- and fits to 30s, which it accepts. Running
+    # the rules first would report a scene that no longer exists.
+    plan = replace(
+        lesson(words=78, ids=("intro",)),
+        scenes=(replace(lesson(words=78, ids=("intro",)).scenes[0], seconds=30.0),),
+    )
+    document, issues, _ = read_back(timed(25.0, 30.0), plan)
+
+    assert sum(s.duration for s in document.scenes[0].steps) == pytest.approx(30.0, abs=0.02)
+    assert "pacing" not in [i.rule for i in issues]
+
+
+def test_the_rules_still_catch_a_scene_the_fit_could_not_rescue():
+    # The converse, so the test above cannot pass by the rule never firing.
+    plan = replace(
+        lesson(words=78, ids=("intro",)),
+        scenes=(replace(lesson(words=78, ids=("intro",)).scenes[0], seconds=30.0),),
+    )
+    # 5s against 30s of narration is a sixfold stretch: outside the fit's
+    # range, so it stays as it is and `pacing` sees it.
+    _, issues, _ = read_back(timed(5.0), plan)
+
+    assert "fits-narration" in [i.rule for i in issues]
+    assert "pacing" in [i.rule for i in issues]

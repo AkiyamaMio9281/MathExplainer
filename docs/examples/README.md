@@ -1,8 +1,39 @@
 # Examples
 
-Three files, each for a different purpose.
+Four files, each for a different purpose.
 
-## `primes.mp4` — a finished lesson
+## `triangle.mp4` — a finished lesson, narrated
+
+What the pipeline produces now. Generated on 2026-09-23 by:
+
+```bash
+python cli.py "explain why the angles of a triangle add to 180 degrees"
+```
+
+```
+4/4 scenes in 306s for $0.5631 over 6 calls
+IR clean first try      yes  (1 layout attempt)
+code passed L2 first    100%
+rules fired             none
+worst audio/video gap   +0.09s
+```
+
+240 seconds, spoken aloud, subtitles placed from the synthesiser's own word
+timings. **Turn the sound on** -- that is the point of this one.
+
+The last line of that summary is the one worth reading. The narration is
+synthesised *before* the layout is asked for, so the layout is told how many
+seconds each scene must fill rather than guessing from a word count, and the
+step durations are then scaled to match exactly. The worst scene ends 0.09s
+away from its voice, and what remains is manim rounding animation lengths up
+to whole frames. The same prompt before that fitting step was out by 6.2s and
+lost its closing words off the end.
+
+## `primes.mp4` — a finished lesson, silent
+
+The same thing one stage earlier, kept because the two together show what the
+audio work changed -- and because this run is the one where the layout retry
+fired for real.
 
 What the pipeline produces, checked in so it can be watched rather than
 described. Generated on 2026-09-20 by:
