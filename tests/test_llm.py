@@ -335,3 +335,51 @@ def test_a_repeated_preamble_is_served_from_cache():
     # Measured at roughly a twelfth; a wide bound leaves room for pricing to
     # move without turning this into a flake.
     assert second.dollars() < first.dollars() / 3
+
+
+# ---------------------------------------------------------------------------
+# Models do not all accept the same request
+# ---------------------------------------------------------------------------
+
+
+def test_a_current_model_gets_adaptive_thinking_and_an_effort_level():
+    request = llm.build_request("hello", model="claude-sonnet-5", effort="low")
+
+    assert request["thinking"] == {"type": "adaptive"}
+    assert request["output_config"]["effort"] == "low"
+
+
+def test_an_older_model_gets_a_budget_and_no_effort():
+    # Sending adaptive to it is a 400, and so is sending effort. The wrong
+    # shape is a rejection rather than a graceful degradation.
+    request = llm.build_request("hello", model="claude-haiku-4-5")
+
+    assert request["thinking"]["type"] == "enabled"
+    assert request["thinking"]["budget_tokens"] >= 1024
+    assert "output_config" not in request
+
+
+def test_a_thinking_budget_never_exceeds_max_tokens():
+    request = llm.build_request("hello", model="claude-haiku-4-5", max_tokens=2000)
+    assert request["thinking"]["budget_tokens"] < 2000
+
+
+def test_a_schema_still_travels_on_a_model_without_effort():
+    request = llm.build_request(
+        "hello", model="claude-haiku-4-5", schema={"type": "object"}
+    )
+
+    assert request["output_config"] == {
+        "format": {"type": "json_schema", "schema": {"type": "object"}}
+    }
+    assert "effort" not in request["output_config"]
+
+
+def test_an_unknown_model_is_assumed_to_be_current():
+    request = llm.build_request("hello", model="claude-something-new")
+    assert request["thinking"] == {"type": "adaptive"}
+
+
+def test_every_priced_model_has_capabilities():
+    # A model that can be billed is a model that can be sent a request.
+    assert set(llm.PRICES) == set(llm.CAPABILITIES)

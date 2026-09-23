@@ -12,9 +12,13 @@ asserted by a test suite that never spends a cent, and several of them are
 facts a future edit would plausibly get wrong:
 
 * Thinking is ``{"type": "adaptive"}``. ``budget_tokens`` is **removed** on
-  this model and sending it returns a 400 -- it is not merely deprecated, and
-  it is the single most likely thing to be reintroduced from memory.
-* ``effort`` goes inside ``output_config``, not at the top level.
+  the current models and sending it returns a 400 -- it is not merely
+  deprecated, and it is the single most likely thing to be reintroduced from
+  memory. The converse is also true and also a 400: an older model takes the
+  budget and rejects adaptive, which is why ``CAPABILITIES`` exists rather
+  than one shape for everything.
+* ``effort`` goes inside ``output_config``, not at the top level, and only for
+  models that accept it at all.
 * Structured output is ``output_config["format"]``. The top-level
   ``output_format`` parameter on ``create`` is deprecated.
 * The large static half of a prompt goes **first** in ``system`` and carries
@@ -63,6 +67,39 @@ PRICES: dict[str, Price] = {
     "claude-sonnet-5": Price(input=2.00, output=10.00),
     "claude-haiku-4-5": Price(input=1.00, output=5.00),
 }
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    """What a model will accept, which is not the same for all of them.
+
+    Sending the wrong shape is a 400, not a graceful degradation, so a model
+    that cannot take adaptive thinking or an effort level must not be sent
+    either. This matters the moment a second model is used for anything --
+    comparing generators, or running a cheap one under a repair loop.
+    """
+
+    adaptive_thinking: bool = True
+    effort: bool = True
+    #: For models that still take a fixed thinking budget. None means no
+    #: thinking configuration at all.
+    thinking_budget: int | None = None
+
+
+CAPABILITIES: dict[str, Capabilities] = {
+    "claude-opus-5": Capabilities(),
+    "claude-sonnet-5": Capabilities(),
+    # Adaptive thinking and `effort` both arrived after this one: it takes the
+    # older fixed budget, and an effort level is rejected outright.
+    "claude-haiku-4-5": Capabilities(
+        adaptive_thinking=False, effort=False, thinking_budget=4_000
+    ),
+}
+
+
+def capabilities(model: str) -> Capabilities:
+    """What *model* accepts. An unknown model is assumed to be current."""
+    return CAPABILITIES.get(model, Capabilities())
 
 # A cache write costs a quarter more than an ordinary input token; a read costs
 # a tenth. Both are why a bill cannot be reconstructed from input_tokens alone.
@@ -183,19 +220,31 @@ def build_request(
         "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
-        # Adaptive, and never budget_tokens: that parameter is removed on this
-        # model and returns a 400.
-        "thinking": {"type": "adaptive"},
-        "output_config": {"effort": effort},
     }
-    if blocks:
-        request["system"] = blocks
+
+    able = capabilities(model)
+    if able.adaptive_thinking:
+        # Adaptive, and never budget_tokens: that parameter is removed on the
+        # current models and returns a 400.
+        request["thinking"] = {"type": "adaptive"}
+    elif able.thinking_budget:
+        # And the converse for an older one, where adaptive is what fails.
+        request["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": min(able.thinking_budget, max_tokens - 1),
+        }
+
+    output_config: dict[str, Any] = {}
+    if able.effort:
+        output_config["effort"] = effort
     if schema is not None:
         # Not the deprecated top-level output_format.
-        request["output_config"]["format"] = {
-            "type": "json_schema",
-            "schema": dict(schema),
-        }
+        output_config["format"] = {"type": "json_schema", "schema": dict(schema)}
+    if output_config:
+        request["output_config"] = output_config
+
+    if blocks:
+        request["system"] = blocks
     return request
 
 
