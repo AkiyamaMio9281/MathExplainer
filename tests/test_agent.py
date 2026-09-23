@@ -527,3 +527,30 @@ def test_subtitles_can_be_turned_off(tmp_path):
 
     assert "subtitle" not in stub.calls
     assert state.ok and not state.subtitled
+
+
+# ---------------------------------------------------------------------------
+# Layout history
+# ---------------------------------------------------------------------------
+
+
+def test_a_layout_fixed_on_the_retry_still_records_what_was_wrong(tmp_path):
+    # Before this, only the final attempt's issues survived, so a retry that
+    # worked erased the evidence of what the rules had caught.
+    first = (ir.Issue("non-empty", "a scene needs a step", "scenes[0]"),)
+    stub = Stub(layout_issues=first, retry_issues=())
+    state = run(stub, tmp_path)
+
+    assert state.ok
+    assert state.layout_history == (first, ())
+    assert "non-empty" in {i.rule for i in agent.issues_of(state)}
+    assert metrics.summarise(state).rules_fired == {"non-empty": 1}
+
+
+def test_the_record_carries_every_layout_attempt(tmp_path):
+    first = (ir.Issue("non-empty", "x", "scenes[0]"),)
+    state = run(Stub(layout_issues=first, retry_issues=()), tmp_path)
+    payload = json.loads(metrics.record(state, tmp_path / "run.json").read_text(encoding="utf-8"))
+
+    assert [len(a) for a in payload["layout_attempts"]] == [1, 0]
+    assert payload["layout_attempts"][0][0]["rule"] == "non-empty"

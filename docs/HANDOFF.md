@@ -235,6 +235,59 @@ Two consequences:
 **Cold start is 9.2 s.** The first-ever manim invocation builds LaTeX and font
 caches. Warm runs are the numbers above. Do not benchmark the first run.
 
+### Eight runs, forty-one scenes (measured 2026-09-23)
+
+Five prompts across five areas of mathematics -- calculus, probability, linear
+algebra, algebra, series -- run in parallel, plus the three earlier runs:
+
+```
+8 runs, 41 scenes
+  code passed L2 first try   41/41 = 100%
+  code repairs               0
+  simplifications            0
+  scenes dropped             0
+  layout retries             1 of 8 runs
+  cost                       $6.05 total, $0.136 a scene, $0.61-1.11 a lesson
+```
+
+**The code repair ladder has never fired.** Not once in forty-one scenes. The
+most likely reason is not that the model is flawless but that the IR stage has
+made codegen easy: translating a validated declarative document with six
+object types and eight actions into Manim is close to mechanical. The open
+decisions -- what to show and where -- happen in the layout stage, and that is
+where the one repair loop that *has* fired was needed.
+
+That has a direct consequence for the ablation in commit 28. Running the same
+prompts with `--no-repair` would show no difference at all, which is an honest
+result and a useless experiment. The informative version varies the *model*
+instead: generate code on Sonnet 5 or Haiku 4.5 and measure how much the
+ladder recovers as the generator gets weaker. That also answers a question
+worth money -- whether a cheap model plus a repair loop beats an expensive one
+alone.
+
+**Five lessons in parallel took 394 s, about the same as one.** Time is
+dominated by waiting on the model, not by local CPU, so throughput scales with
+parallel lessons. That settles the parallel-rendering open question below:
+parallelise at the lesson level, not the scene level.
+
+### The MathTex extent estimate is where the warnings come from
+
+Those 25 scenes produced 45 layout warnings, and **41 of them (91%) name a
+MathTex object**; all 23 `no-overlap` warnings do. The two most-warned scenes
+were then inspected frame by frame, from a still moment, and both were clean.
+
+The cause is stated in `ir_rules.py` and was not treated as urgent until now:
+MathTex width is estimated from the length of the *LaTeX source*.
+`+\frac{1}{2}` is eleven characters that render as one narrow stacked
+fraction; `\begin{bmatrix}3 & 1\\0 & 2\end{bmatrix}` is thirty-odd that
+render as a small block. So the estimator inflates anything with markup, and
+the rule reports overlaps that are not there.
+
+This has to be fixed before warnings are allowed to drive `simplify_ir`. Wiring
+them up as they stand would tear apart good scenes on the strength of a bad
+estimate. The fix is the same shape as the one in 688c8b3: strip LaTeX markup
+before counting, then calibrate against manim with a slow test.
+
 ### The layout retry, firing for the first time (2026-09-20)
 
 Same prompt, after the subtitle band was reserved:
@@ -410,9 +463,10 @@ a key.
   round of "the layout is overlapping" turned out to be that; the settled
   frames were clean and the estimator was within 12% of manim. Grab a frame
   during a `wait`, at full resolution, before believing a layout is broken.
-- **Parallel scene rendering** is possible by construction (independent
-  workdirs) but not implemented. Worth doing once render time is the
-  bottleneck, and it makes a good profiling result.
+- ~~**Parallel scene rendering**~~ -- answered by measurement. Five lessons
+  run in parallel finished in the time of one, because the wall clock is model
+  latency rather than local CPU. Parallelism belongs at the lesson level;
+  parallel *scenes* would optimise the 10-20% of a run that is rendering.
 - **The web renderer** consuming the same IR is the strongest available answer
   to the posting's web requirement, and also the largest piece of work. Decide
   early whether it is in scope; the IR is already renderer-agnostic either way.

@@ -218,6 +218,14 @@ and the metrics stop being a pile of statistics and become an argument: this
 is what the repair loop bought, this is what IR validation bought. The runs
 themselves cost wall-clock and dollars on top.
 
+**Revised after measuring.** Forty-one scenes across eight runs passed L2 on
+the first attempt, so `--no-repair` would show no difference and prove
+nothing. The experiment worth running varies the code generator's model --
+Sonnet 5, Haiku 4.5 -- and measures how much the ladder recovers as it gets
+weaker, which also answers whether a cheap model plus repair beats an
+expensive model alone. `--no-validate-ir` is untouched by this and still
+earns its place.
+
 Commit 30 attacks the fixed ~1 s of Python start-up plus `import manim` that
 every check tier pays — see the measurements in `HANDOFF.md` section 5. A
 worker process that keeps manim imported removes it entirely, and the

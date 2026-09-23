@@ -86,6 +86,10 @@ class Run:
     plan_issues: tuple[Issue, ...] = ()
     layout_issues: tuple[Issue, ...] = ()
     layout_attempts: int = 0
+    # Every attempt's issues, not only the last. A layout fixed on its retry
+    # otherwise records nothing about what was wrong the first time -- which
+    # is exactly the "which rule caught which defect" the metrics exist for.
+    layout_history: tuple[tuple[Issue, ...], ...] = ()
     usage: llm.Usage = field(default_factory=llm.Usage)
     seconds: float = 0.0
     stopped: str = ""
@@ -196,6 +200,7 @@ def run(
     # -- layout -------------------------------------------------------------
     document: ir.Document | None = None
     layout_issues: tuple[Issue, ...] = ()
+    history: tuple[tuple[Issue, ...], ...] = ()
     for attempt in range(1, LAYOUT_ROUNDS + 1):
         if (breach := spent()):
             return close(stopped=breach, error="stopped before the layout was usable")
@@ -214,6 +219,7 @@ def run(
             document=document,
             layout_issues=layout_issues,
             layout_attempts=attempt,
+            layout_history=(history := history + (layout_issues,)),
         )
         if document is not None and not layout.errors(layout_issues):
             break
@@ -281,5 +287,15 @@ def run(
 
 
 def issues_of(state: Run) -> tuple[Issue, ...]:
-    """Every issue the run recorded, in the order the stages produced them."""
-    return tuple(state.plan_issues) + tuple(state.layout_issues)
+    """Every issue the run recorded, in the order the stages produced them.
+
+    Across every layout attempt, so a defect the retry fixed still counts as
+    one the rules caught. Falls back to the final attempt for a Run built
+    without a history.
+    """
+    layouts = (
+        tuple(i for attempt in state.layout_history for i in attempt)
+        if state.layout_history
+        else tuple(state.layout_issues)
+    )
+    return tuple(state.plan_issues) + layouts

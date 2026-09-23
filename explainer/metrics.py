@@ -200,6 +200,14 @@ def record(state: agent.Run, path: Path) -> Path:
              "message": i.message}
             for i in agent.issues_of(state)
         ],
+        "layout_attempts": [
+            [
+                {"rule": i.rule, "where": i.where, "severity": i.severity.value,
+                 "message": i.message}
+                for i in attempt
+            ]
+            for attempt in state.layout_history
+        ],
         "scenes": [
             {
                 "id": o.scene_id,
